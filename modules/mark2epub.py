@@ -149,6 +149,8 @@ def update_package_manifest(doc: minidom.Document, image_filenames: list[str],
         manifest.appendChild(item)
         
 def get_all_filenames(the_dir, extensions=[]):
+    if not os.path.exists(the_dir):
+        return []
     all_files = [x for x in os.listdir(the_dir)]
     all_files = [x for x in all_files if x.split(".")[-1] in extensions]
     return all_files
