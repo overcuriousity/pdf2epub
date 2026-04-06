@@ -1,3 +1,4 @@
-marker-pdf==0.3.10
-transformers==4.45.2
-markdown==3.7
+marker-pdf==1.10.2
+transformers==4.57.6
+markdown==3.10.2
+latex2mathml==3.79.0
