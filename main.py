@@ -31,12 +31,6 @@ def main():
         help='Path to output directory (default: directory named after PDF)'
     )
     parser.add_argument(
-        '--batch-multiplier',
-        type=int,
-        default=2,
-        help='Multiplier for batch size (higher uses more memory but processes faster)'
-    )
-    parser.add_argument(
         '--max-pages',
         type=int,
         default=None,
@@ -47,12 +41,6 @@ def main():
         type=int,
         default=None,
         help='Page number to start from'
-    )
-    parser.add_argument(
-        '--langs',
-        type=str,
-        default=None,
-        help='Comma-separated list of languages in the document'
     )
     parser.add_argument(
         '--skip-epub',
@@ -100,10 +88,8 @@ def main():
                 pdf2md.convert_pdf(
                     str(pdf_path),
                     markdown_dir,
-                    args.batch_multiplier,
                     args.max_pages,
                     args.start_page,
-                    args.langs
                 )
             
             # Convert Markdown to EPUB unless skipped

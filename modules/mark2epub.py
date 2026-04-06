@@ -7,9 +7,12 @@ import json
 from PIL import Image
 import regex as re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import subprocess
 from typing import Dict, Optional, Tuple
+from urllib.parse import quote
+from xml.sax.saxutils import escape as xml_escape
+import latex2mathml.converter
 
 def get_user_input(prompt: str, default: str = "") -> str:
     """Get user input with a default value."""
@@ -73,29 +76,36 @@ def review_markdown(markdown_path: Path) -> tuple[bool, str]:
         else:
             print("Please enter 'y' or 'n'")
 
+def build_image_lookup(images_dir: Path) -> dict:
+    """Build a {lowercase_name: actual_path} map for O(1) case-insensitive lookups."""
+    lookup = {}
+    try:
+        for entry in images_dir.iterdir():
+            lookup[entry.name.lower()] = entry
+    except FileNotFoundError:
+        pass
+    return lookup
+
 def process_markdown_for_images(markdown_text: str, work_dir: Path) -> tuple[str, list[str]]:
     """Process markdown content to find image references."""
     image_pattern = r'!\[(.*?)\]\((.*?)\)'
     images_found = []
     modified_text = markdown_text
-    
+    images_dir = work_dir / 'images'
+    lookup = build_image_lookup(images_dir)
+
     for match in re.finditer(image_pattern, markdown_text):
         alt_text, image_path = match.groups()
-        image_path = image_path.strip()
-        img_path = Path(image_path)
-        if img_path.is_absolute():
-            rel_path = img_path.relative_to(work_dir)
-        else:
-            rel_path = img_path
-            
-        full_image_path = work_dir / 'images' / img_path.name
-        if full_image_path.exists():
-            images_found.append(img_path.name)
-            new_ref = f'![{alt_text}](images/{img_path.name})'
+        img_path = Path(image_path.strip())
+
+        actual = lookup.get(img_path.name.lower())
+        if actual is not None:
+            images_found.append(actual.name)
+            new_ref = f'![{alt_text}](images/{actual.name})'
             modified_text = modified_text.replace(match.group(0), new_ref)
         else:
-            print(f"Warning: Image not found: {full_image_path}")
-    
+            print(f"Warning: Image not found: {images_dir / img_path.name}")
+
     return modified_text, images_found
 
 def copy_and_optimize_image(src_path: Path, dest_path: Path, max_dimension: int = 1800) -> None:
@@ -172,11 +182,17 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
     for k,v in description_data["metadata"].items():
         if len(v):
             x = doc.createElement(k)
-            for metadata_type,id_label in [("dc:title","title"),("dc:creator","creator"),("dc:identifier","book-id")]:
+            for metadata_type,id_label in [("dc:title","title"),("dc:creator","creator"),("dc:identifier","pub-id")]:
                 if k==metadata_type:
                     x.setAttribute('id',id_label)
             x.appendChild(doc.createTextNode(v))
             metadata.appendChild(x)
+
+    # Required by EPUB 3: dcterms:modified timestamp
+    modified_meta = doc.createElement('meta')
+    modified_meta.setAttribute('property', 'dcterms:modified')
+    modified_meta.appendChild(doc.createTextNode(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    metadata.appendChild(modified_meta)
 
 
     ## Now building the manifest
@@ -207,14 +223,14 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
     for i,md_filename in enumerate(md_filenames):
         x = doc.createElement('item')
         x.setAttribute('id',"s{:05d}".format(i))
-        x.setAttribute('href',"s{:05d}-{}.xhtml".format(i,md_filename.split(".")[0]))
+        x.setAttribute('href', quote("s{:05d}-{}.xhtml".format(i, md_filename.split(".")[0])))
         x.setAttribute('media-type',"application/xhtml+xml")
         manifest.appendChild(x)
 
     for i,image_filename in enumerate(image_filenames):
         x = doc.createElement('item')
         x.setAttribute('id',"image-{:05d}".format(i))
-        x.setAttribute('href',"images/{}".format(image_filename))
+        x.setAttribute('href', "images/{}".format(quote(image_filename)))
         if "gif" in image_filename:
             x.setAttribute('media-type',"image/gif")
         elif "jpg" in image_filename:
@@ -249,7 +265,7 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
     x.setAttribute('idref',"titlepage")
     x.setAttribute('linear',"yes")
     spine.appendChild(x)
-    for i,md_filename in enumerate(md_filenames):
+    for i,_ in enumerate(md_filenames):
         x = doc.createElement('itemref')
         x.setAttribute('idref',"s{:05d}".format(i))
         x.setAttribute('linear',"yes")
@@ -338,26 +354,81 @@ def get_TOC_XML(default_css_filenames, markdown_filenames):
     toc_xhtml += """</head>\n<body>\n"""
     toc_xhtml += """<nav epub:type="toc" role="doc-toc" id="toc">\n<h2>Contents</h2>\n<ol epub:type="list">"""
     for i,md_filename in enumerate(markdown_filenames):
-        toc_xhtml += """<li><a href="s{:05d}-{}.xhtml">{}</a></li>""".format(i,md_filename.split(".")[0],md_filename.split(".")[0])
+        stem = md_filename.split(".")[0]
+        href = quote("s{:05d}-{}.xhtml".format(i, stem))
+        toc_xhtml += """<li><a href="{}">{}</a></li>""".format(href, stem)
     toc_xhtml += """</ol>\n</nav>\n</body>\n</html>"""
 
     return toc_xhtml
 
-def get_TOCNCX_XML(markdown_filenames):
+def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
     ## Returns the XML data for the TOC.ncx file
 
     toc_ncx = """<?xml version="1.0" encoding="UTF-8"?>\n"""
-    toc_ncx += """<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" xml:lang="fr" version="2005-1">\n"""
-    toc_ncx += """<head>\n</head>\n"""
+    toc_ncx += """<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" xml:lang="en" version="2005-1">\n"""
+    toc_ncx += """<head>\n"""
+    toc_ncx += """<meta name="dtb:uid" content="{}"/>\n""".format(xml_escape(uid))
+    toc_ncx += """<meta name="dtb:depth" content="1"/>\n"""
+    toc_ncx += """<meta name="dtb:totalPageCount" content="0"/>\n"""
+    toc_ncx += """<meta name="dtb:maxPageNumber" content="0"/>\n"""
+    toc_ncx += """</head>\n"""
+    toc_ncx += """<docTitle><text>{}</text></docTitle>\n""".format(xml_escape(title))
     toc_ncx += """<navMap>\n"""
     for i,md_filename in enumerate(markdown_filenames):
-        toc_ncx += """<navPoint id="navpoint-{}">\n""".format(i)
-        toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(md_filename.split(".")[0])
-        toc_ncx += """<content src="s{:05d}-{}.xhtml"/>""".format(i,md_filename.split(".")[0])
+        stem = md_filename.split(".")[0]
+        src = quote("s{:05d}-{}.xhtml".format(i, stem))
+        toc_ncx += """<navPoint id="navpoint-{}" playOrder="{}">\n""".format(i, i + 1)
+        toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(stem)
+        toc_ncx += """<content src="{}"/>""".format(src)
         toc_ncx += """ </navPoint>"""
     toc_ncx += """</navMap>\n</ncx>"""
 
     return toc_ncx
+
+def convert_math_to_mathml(html_text: str) -> str:
+    """Replace LaTeX math expressions in HTML with MathML, skipping code blocks."""
+    # Mask <pre>/<code> blocks so their $ delimiters are never treated as math
+    placeholders = {}
+    counter = [0]
+
+    def mask(m):
+        key = f"\x00MASK{counter[0]}\x00"
+        counter[0] += 1
+        placeholders[key] = m.group(0)
+        return key
+
+    masked = re.sub(r'<pre[\s\S]*?</pre>|<code[\s\S]*?</code>', mask, html_text, flags=re.DOTALL)
+
+    def try_convert(latex):
+        try:
+            return latex2mathml.converter.convert(latex)
+        except Exception:
+            return None
+
+    # Standalone display math that Markdown wrapped in <p>: replace the whole
+    # paragraph to avoid invalid XHTML like <p><div>...</div></p>
+    def replace_display_paragraph(m):
+        mathml = try_convert(m.group(1))
+        return f'<div class="math-display">{mathml}</div>' if mathml else m.group(0)
+
+    # Remaining $$...$$ (inside phrasing content): use <span> to stay valid
+    def replace_display_inline(m):
+        mathml = try_convert(m.group(1))
+        return f'<span class="math-display">{mathml}</span>' if mathml else m.group(0)
+
+    # Inline $...$
+    def replace_inline(m):
+        mathml = try_convert(m.group(1))
+        return f'<span class="math-inline">{mathml}</span>' if mathml else m.group(0)
+
+    masked = re.sub(r'<p>\s*\$\$(.*?)\$\$\s*</p>', replace_display_paragraph, masked, flags=re.DOTALL)
+    masked = re.sub(r'\$\$(.*?)\$\$', replace_display_inline, masked, flags=re.DOTALL)
+    masked = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', replace_inline, masked, flags=re.DOTALL)
+
+    for key, original in placeholders.items():
+        masked = masked.replace(key, original)
+
+    return masked
 
 def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], content: Optional[str] = None) -> tuple[str, list[str]]:
     """
@@ -388,9 +459,12 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
         extension_configs={"codehilite": {"guess_lang": False}}
     )
 
+    # Convert LaTeX math to MathML for EPUB readers
+    html_text = convert_math_to_mathml(html_text)
+
     # Generate XHTML wrapper
     xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xmlns:m="http://www.w3.org/1998/Math/MathML" lang="en">
 <head>
     <meta http-equiv="default-style" content="text/html; charset=utf-8"/>
     {''.join(f'<link rel="stylesheet" href="css/{css}" type="text/css" media="all"/>' for css in css_filenames)}
@@ -578,7 +652,11 @@ def main(args):
             )
             
             epub.writestr("OPS/toc.ncx",
-                get_TOCNCX_XML(all_md_filenames),
+                get_TOCNCX_XML(
+                    all_md_filenames,
+                    uid=json_data["metadata"].get("dc:identifier", ""),
+                    title=json_data["metadata"].get("dc:title", "")
+                ),
                 zipfile.ZIP_DEFLATED
             )
 
@@ -590,14 +668,20 @@ def main(args):
                     with open(os.path.join(images_dir, image), "rb") as f:
                         epub.writestr(f"OPS/images/{image}", f.read(), zipfile.ZIP_DEFLATED)
 
-            # Copy CSS files
-            if os.path.exists(css_dir):
-                print(f"Writing {len(all_css_filenames)} CSS files...")
-                for css in all_css_filenames:
-                    css_path = os.path.join(css_dir, css)
-                    if os.path.exists(css_path):
-                        with open(css_path, "rb") as f:
-                            epub.writestr(f"OPS/css/{css}", f.read(), zipfile.ZIP_DEFLATED)
+            # Copy CSS files; write a default style.css for any that are missing
+            default_css_content = b"""body { font-family: serif; line-height: 1.5; margin: 5%; }
+h1, h2, h3, h4, h5, h6 { font-family: sans-serif; }
+img { max-width: 100%; height: auto; }
+pre, code { font-family: monospace; font-size: 0.9em; }
+"""
+            print(f"Writing {len(all_css_filenames)} CSS files...")
+            for css in all_css_filenames:
+                css_path = os.path.join(css_dir, css)
+                if os.path.exists(css_path):
+                    with open(css_path, "rb") as f:
+                        epub.writestr(f"OPS/css/{css}", f.read(), zipfile.ZIP_DEFLATED)
+                else:
+                    epub.writestr(f"OPS/css/{css}", default_css_content, zipfile.ZIP_DEFLATED)
 
         print(f"\nEPUB creation complete: {output_path}")
         

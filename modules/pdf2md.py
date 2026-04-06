@@ -79,54 +79,59 @@ def save_images(images: dict, image_dir: Path) -> None:
 def convert_pdf(
     input_path: str,
     output_dir: Path,
-    batch_multiplier: int = 2,
     max_pages: int = None,
     start_page: int = None,
-    langs: str = None
 ) -> None:
     """
     Convert a single PDF file to markdown format with enhanced image handling.
     """
     try:
-        # Load models
-        from marker.models import load_all_models
-        from marker.convert import convert_single_pdf
-        
-        model_lst = load_all_models()
-        
-        # Convert languages string to list if provided
-        languages = [lang.strip() for lang in langs.split(',')] if langs else None
-        
-        # Convert the PDF
-        full_text, images, metadata = convert_single_pdf(
-            input_path,
-            model_lst,
-            batch_multiplier=batch_multiplier,
-            max_pages=max_pages,
-            start_page=start_page,
-            langs=languages
-        )
-        
+        from marker.models import create_model_dict
+        from marker.converters.pdf import PdfConverter
+
+        models = create_model_dict()
+
+        # Build page_range config. marker-pdf 1.x requires an explicit list of
+        # page indices; there is no "start to end" shorthand. If start_page is
+        # given without max_pages we cannot construct the range without knowing
+        # the document's page count, so we warn and process all pages instead.
+        config = {}
+        if max_pages is not None:
+            s = start_page or 0
+            config["page_range"] = list(range(s, s + max_pages))
+        elif start_page is not None:
+            print(
+                f"Warning: --start-page requires --max-pages in marker-pdf 1.x "
+                f"(no open-ended page range is supported). Processing all pages."
+            )
+
+        converter = PdfConverter(config=config, artifact_dict=models)
+        rendered = converter(input_path)
+
+        full_text = rendered.markdown
+        images = rendered.images
+        metadata = rendered.metadata
+
         # All output will go to the output directory
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Save markdown content
         md_output = output_dir / f"{Path(input_path).stem}.md"
         md_output.write_text(full_text, encoding='utf-8')
         print(f"Markdown saved to: {md_output}")
-        
+
         # Save metadata as JSON
         meta_output = output_dir / f"{Path(input_path).stem}_metadata.json"
         with open(meta_output, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2)
         print(f"Metadata saved to: {meta_output}")
-        
+
         # Enhanced image handling
         try:
             if images:
                 image_dir = output_dir / "images"
                 save_images(images, image_dir)
-                
+
                 # Cleanup PIL Images
                 for img in images.values():
                     if isinstance(img, Image.Image):
@@ -134,10 +139,10 @@ def convert_pdf(
                             img.close()
                         except Exception as e:
                             print(f"Warning: Failed to close image: {e}")
-                images.clear()  # Clear the dictionary to help with cleanup
+                images.clear()
         except Exception as e:
             print(f"Warning: Error during image cleanup: {e}")
-            
+
     except Exception as e:
         print(f"Error converting {input_path}: {str(e)}", file=sys.stderr)
         sys.exit(1)
