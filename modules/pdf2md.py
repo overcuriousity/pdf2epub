@@ -91,14 +91,19 @@ def convert_pdf(
 
         models = create_model_dict()
 
-        # Build page_range from start_page / max_pages if provided
+        # Build page_range config. marker-pdf 1.x requires an explicit list of
+        # page indices; there is no "start to end" shorthand. If start_page is
+        # given without max_pages we cannot construct the range without knowing
+        # the document's page count, so we warn and process all pages instead.
         config = {}
-        if start_page is not None or max_pages is not None:
+        if max_pages is not None:
             s = start_page or 0
-            if max_pages is not None:
-                config["page_range"] = list(range(s, s + max_pages))
-            else:
-                config["page_range"] = list(range(s, 10_000))  # open-ended
+            config["page_range"] = list(range(s, s + max_pages))
+        elif start_page is not None:
+            print(
+                f"Warning: --start-page requires --max-pages in marker-pdf 1.x "
+                f"(no open-ended page range is supported). Processing all pages."
+            )
 
         converter = PdfConverter(config=config, artifact_dict=models)
         rendered = converter(input_path)

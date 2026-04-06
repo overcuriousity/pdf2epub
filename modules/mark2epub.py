@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import subprocess
 from typing import Dict, Optional, Tuple
 from urllib.parse import quote
+from xml.sax.saxutils import escape as xml_escape
 import latex2mathml.converter
 
 def get_user_input(prompt: str, default: str = "") -> str:
@@ -75,16 +76,15 @@ def review_markdown(markdown_path: Path) -> tuple[bool, str]:
         else:
             print("Please enter 'y' or 'n'")
 
-def find_image_case_insensitive(images_dir: Path, name: str) -> Optional[Path]:
-    """Find an image file case-insensitively. Returns the actual Path or None."""
-    name_lower = name.lower()
+def build_image_lookup(images_dir: Path) -> dict:
+    """Build a {lowercase_name: actual_path} map for O(1) case-insensitive lookups."""
+    lookup = {}
     try:
         for entry in images_dir.iterdir():
-            if entry.name.lower() == name_lower:
-                return entry
+            lookup[entry.name.lower()] = entry
     except FileNotFoundError:
         pass
-    return None
+    return lookup
 
 def process_markdown_for_images(markdown_text: str, work_dir: Path) -> tuple[str, list[str]]:
     """Process markdown content to find image references."""
@@ -92,13 +92,13 @@ def process_markdown_for_images(markdown_text: str, work_dir: Path) -> tuple[str
     images_found = []
     modified_text = markdown_text
     images_dir = work_dir / 'images'
+    lookup = build_image_lookup(images_dir)
 
     for match in re.finditer(image_pattern, markdown_text):
         alt_text, image_path = match.groups()
-        image_path = image_path.strip()
-        img_path = Path(image_path)
+        img_path = Path(image_path.strip())
 
-        actual = find_image_case_insensitive(images_dir, img_path.name)
+        actual = lookup.get(img_path.name.lower())
         if actual is not None:
             images_found.append(actual.name)
             new_ref = f'![{alt_text}](images/{actual.name})'
@@ -230,7 +230,7 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
     for i,image_filename in enumerate(image_filenames):
         x = doc.createElement('item')
         x.setAttribute('id',"image-{:05d}".format(i))
-        x.setAttribute('href',"images/{}".format(image_filename))
+        x.setAttribute('href', "images/{}".format(quote(image_filename)))
         if "gif" in image_filename:
             x.setAttribute('media-type',"image/gif")
         elif "jpg" in image_filename:
@@ -367,12 +367,12 @@ def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
     toc_ncx = """<?xml version="1.0" encoding="UTF-8"?>\n"""
     toc_ncx += """<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" xml:lang="en" version="2005-1">\n"""
     toc_ncx += """<head>\n"""
-    toc_ncx += """<meta name="dtb:uid" content="{}"/>\n""".format(uid)
+    toc_ncx += """<meta name="dtb:uid" content="{}"/>\n""".format(xml_escape(uid))
     toc_ncx += """<meta name="dtb:depth" content="1"/>\n"""
     toc_ncx += """<meta name="dtb:totalPageCount" content="0"/>\n"""
     toc_ncx += """<meta name="dtb:maxPageNumber" content="0"/>\n"""
     toc_ncx += """</head>\n"""
-    toc_ncx += """<docTitle><text>{}</text></docTitle>\n""".format(title)
+    toc_ncx += """<docTitle><text>{}</text></docTitle>\n""".format(xml_escape(title))
     toc_ncx += """<navMap>\n"""
     for i,md_filename in enumerate(markdown_filenames):
         stem = md_filename.split(".")[0]
@@ -386,29 +386,49 @@ def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
     return toc_ncx
 
 def convert_math_to_mathml(html_text: str) -> str:
-    """Replace LaTeX math expressions in HTML with inline MathML."""
-    # Display math: $$...$$
-    def replace_display(m):
-        latex = m.group(1)
-        try:
-            mathml = latex2mathml.converter.convert(latex)
-            # Wrap in a block-level span so readers treat it as display math
-            return f'<div class="math-display">{mathml}</div>'
-        except Exception:
-            return m.group(0)
+    """Replace LaTeX math expressions in HTML with MathML, skipping code blocks."""
+    # Mask <pre>/<code> blocks so their $ delimiters are never treated as math
+    placeholders = {}
+    counter = [0]
 
-    # Inline math: $...$  (not preceded/followed by another $)
+    def mask(m):
+        key = f"\x00MASK{counter[0]}\x00"
+        counter[0] += 1
+        placeholders[key] = m.group(0)
+        return key
+
+    masked = re.sub(r'<pre[\s\S]*?</pre>|<code[\s\S]*?</code>', mask, html_text, flags=re.DOTALL)
+
+    def try_convert(latex):
+        try:
+            return latex2mathml.converter.convert(latex)
+        except Exception:
+            return None
+
+    # Standalone display math that Markdown wrapped in <p>: replace the whole
+    # paragraph to avoid invalid XHTML like <p><div>...</div></p>
+    def replace_display_paragraph(m):
+        mathml = try_convert(m.group(1))
+        return f'<div class="math-display">{mathml}</div>' if mathml else m.group(0)
+
+    # Remaining $$...$$ (inside phrasing content): use <span> to stay valid
+    def replace_display_inline(m):
+        mathml = try_convert(m.group(1))
+        return f'<span class="math-display">{mathml}</span>' if mathml else m.group(0)
+
+    # Inline $...$
     def replace_inline(m):
-        latex = m.group(1)
-        try:
-            mathml = latex2mathml.converter.convert(latex)
-            return f'<span class="math-inline">{mathml}</span>'
-        except Exception:
-            return m.group(0)
+        mathml = try_convert(m.group(1))
+        return f'<span class="math-inline">{mathml}</span>' if mathml else m.group(0)
 
-    html_text = re.sub(r'\$\$(.*?)\$\$', replace_display, html_text, flags=re.DOTALL)
-    html_text = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', replace_inline, html_text, flags=re.DOTALL)
-    return html_text
+    masked = re.sub(r'<p>\s*\$\$(.*?)\$\$\s*</p>', replace_display_paragraph, masked, flags=re.DOTALL)
+    masked = re.sub(r'\$\$(.*?)\$\$', replace_display_inline, masked, flags=re.DOTALL)
+    masked = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', replace_inline, masked, flags=re.DOTALL)
+
+    for key, original in placeholders.items():
+        masked = masked.replace(key, original)
+
+    return masked
 
 def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], content: Optional[str] = None) -> tuple[str, list[str]]:
     """
