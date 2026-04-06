@@ -377,7 +377,7 @@ def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
     for i,md_filename in enumerate(markdown_filenames):
         stem = md_filename.split(".")[0]
         src = quote("s{:05d}-{}.xhtml".format(i, stem))
-        toc_ncx += """<navPoint id="navpoint-{}">\n""".format(i)
+        toc_ncx += """<navPoint id="navpoint-{}" playOrder="{}">\n""".format(i, i + 1)
         toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(stem)
         toc_ncx += """<content src="{}"/>""".format(src)
         toc_ncx += """ </navPoint>"""
