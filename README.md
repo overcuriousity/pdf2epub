@@ -34,11 +34,18 @@ works, but it is slower and requires a working C toolchain.
 
 ## 💻 Installation
 
-1. Create and activate a virtual environment:
+1. Create and activate a virtual environment.
+
+On Linux/Mac:
 ```bash
 python3.13 -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-.venv\Scripts\activate     # Windows
+source .venv/bin/activate
+```
+
+On Windows:
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\activate
 ```
 
 2. Install Python dependencies (this installs PyTorch as well):
