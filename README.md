@@ -16,43 +16,54 @@ Convert PDF files to nicely structured Markdown and EPUB format with intelligent
 
 ## 🛠️ Dependencies
 
-- Python 3.9+
+- Python 3.10–3.14 (3.13 recommended, see below)
 - PyTorch (with CUDA/ROCm support for GPU acceleration)
-- marker-pdf==0.3.10
-- transformers==4.45.2
-- markdown==3.7
+- marker-pdf==1.10.2
+- transformers==4.57.6
+- markdown==3.10.2
+- latex2mathml==3.79.0
+
+### ⚠️ Python version
+
+Python 3.13 is recommended.
+
+`marker-pdf` constrains `Pillow<11.0.0`, and Pillow only ships Python 3.14
+wheels from 11.3.0 onward. On Python 3.10–3.13 every dependency installs as a
+prebuilt wheel. On 3.14, pip has to build Pillow from source instead: this
+works, but it is slower and requires a working C toolchain.
 
 ## 💻 Installation
 
-1. Install Python dependencies:
+1. Create and activate a virtual environment:
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+.venv\Scripts\activate     # Windows
+```
+
+2. Install Python dependencies (this installs PyTorch as well):
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Install PyTorch:
-- For NVIDIA GPUs, install with CUDA support:
+3. GPU acceleration (optional):
+
+PyTorch is installed as a dependency in step 2. On Apple Silicon that wheel
+already supports MPS, so no further action is needed. For a specific CUDA or
+ROCm build, reinstall PyTorch using the selector at
+[pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/).
+For example, for AMD GPUs with ROCm:
 ```bash
-pip install torch torchvision torchaudio
+pip uninstall torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
 ```
 
-- For AMD GPUs, install with ROCm support:
-```bash
-pip3 uninstall torch torchvision torchaudio
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
-```
-
-- For Apple Silicon, install with MPS support:
-```bash
-pip3 uninstall torch torchvision torchaudio
-pip3 install --pre torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cpu
-```
-
-3. Verify GPU support:
+4. Verify GPU support:
 ```python
 import torch
 print(torch.__version__)  # PyTorch version
 print(torch.cuda.is_available())  # Should return True for NVIDIA
-print(torch.mps.is_available())  # Should return True for Apple Silicon
+print(torch.backends.mps.is_available())  # Should return True for Apple Silicon
 print(torch.version.hip)  # Should print ROCm version for AMD
 ```
 
@@ -70,30 +81,30 @@ Convert all PDFs in a directory:
 python main.py input_directory/
 ```
 
+EPUB generation prompts interactively for metadata (title, author, language,
+and so on; press Enter to accept each default). It therefore needs a terminal —
+run it non-interactively and it will fail with `EOFError`. Use `--skip-epub` to
+produce only markdown without any prompts.
+
 ### Advanced Options
 
 ```bash
 python main.py [input_path] [output_path] [options]
 
 Options:
-  --batch-multiplier INT    Batch size multiplier for memory/speed tradeoff (default: 2)
   --max-pages INT          Maximum number of pages to process
   --start-page INT         Page number to start from
-  --langs STRING           Comma-separated list of languages in document
-  --skip-epub             Skip EPUB generation, only create markdown
-  --skip-md               Skip markdown generation, use existing markdown files
+  --skip-epub              Skip EPUB generation, only create markdown
+  --skip-md                Skip markdown generation, use existing markdown files
 ```
+
+If `input_path` is omitted, all PDFs in `./input/` are processed.
 
 ### Examples
 
 Process a specific range of pages:
 ```bash
 python main.py book.pdf --start-page 10 --max-pages 50
-```
-
-Process a multi-language document:
-```bash
-python main.py paper.pdf --langs "English,German"
 ```
 
 Convert to markdown only:
