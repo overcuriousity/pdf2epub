@@ -145,7 +145,7 @@ def convert_pdf(
 
     except Exception as e:
         print(f"Error converting {input_path}: {str(e)}", file=sys.stderr)
-        sys.exit(1)
+        raise
 
     
 def add_pdfs_to_queue(input_path: Path) -> list[Path]:
