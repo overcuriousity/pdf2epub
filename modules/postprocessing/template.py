@@ -24,7 +24,7 @@ Send ONLY the python script content back to the user. your answer should exclusi
 
 import re
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List
 import logging
 
 # Configure logging
