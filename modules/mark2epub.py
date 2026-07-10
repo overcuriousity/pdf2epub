@@ -9,7 +9,7 @@ import regex as re
 from pathlib import Path
 from datetime import datetime, timezone
 import subprocess
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 import latex2mathml.converter
@@ -487,9 +487,6 @@ def convert_to_epub(markdown_dir: Path, output_path: Path) -> None:
     if not list(markdown_dir.glob('*.md')):
         raise ValueError(f"No markdown files found in: {markdown_dir}")
     
-    # Set up mark2epub's working directory
-    work_dir = str(markdown_dir)
-    
     # Generate EPUB file
     epub_path = markdown_dir / f"{markdown_dir.name}.epub"
     main([str(markdown_dir), str(epub_path)])
@@ -684,7 +681,7 @@ pre, code { font-family: monospace; font-size: 0.9em; }
 
         print(f"\nEPUB creation complete: {output_path}")
         
-    except Exception as e:
+    except Exception:
         import traceback
         print(f"Error processing {work_dir}:")
         print(traceback.format_exc())

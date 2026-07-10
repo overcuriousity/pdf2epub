@@ -21,7 +21,7 @@ Convert PDF files to nicely structured Markdown and EPUB format with intelligent
 - marker-pdf==1.10.2
 - transformers==4.57.6
 - markdown==3.10.2
-- latex2mathml==3.79.0
+- latex2mathml==3.81.0
 
 ### ⚠️ Python version
 
@@ -149,7 +149,7 @@ Please ensure your code follows the existing style and includes appropriate test
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/pdf2epub.git
+git clone https://github.com/overcuriousity/pdf2epub.git
 cd pdf2epub
 ```
 

@@ -1,8 +1,6 @@
-import argparse
 from pathlib import Path
 import sys
 import json
-import marker 
 from PIL import Image
 import io
 
@@ -101,8 +99,8 @@ def convert_pdf(
             config["page_range"] = list(range(s, s + max_pages))
         elif start_page is not None:
             print(
-                f"Warning: --start-page requires --max-pages in marker-pdf 1.x "
-                f"(no open-ended page range is supported). Processing all pages."
+                "Warning: --start-page requires --max-pages in marker-pdf 1.x "
+                "(no open-ended page range is supported). Processing all pages."
             )
 
         converter = PdfConverter(config=config, artifact_dict=models)
