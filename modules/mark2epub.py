@@ -231,13 +231,12 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
         x = doc.createElement('item')
         x.setAttribute('id',"image-{:05d}".format(i))
         x.setAttribute('href', "images/{}".format(quote(image_filename)))
-        if "gif" in image_filename:
+        ext = Path(image_filename).suffix.lower()
+        if ext == '.gif':
             x.setAttribute('media-type',"image/gif")
-        elif "jpg" in image_filename:
+        elif ext in ['.jpg', '.jpeg']:
             x.setAttribute('media-type',"image/jpeg")
-        elif "jpeg" in image_filename:
-            x.setAttribute('media-type',"image/jpg")
-        elif "png" in image_filename:
+        elif ext == '.png':
             x.setAttribute('media-type',"image/png")
         if image_filename==description_data["cover_image"]:
             x.setAttribute('properties',"cover-image")
