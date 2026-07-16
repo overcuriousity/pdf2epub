@@ -58,7 +58,12 @@ def review_markdown(markdown_path: Path) -> tuple[bool, str]:
         response = input("\nWould you like to review the markdown file before conversion? (y/n): ").lower()
         if response in ['y', 'yes']:
             try:
-                subprocess.run(['xdg-open' if os.name == 'posix' else 'start', str(markdown_path)], check=True)
+                if sys.platform == 'darwin':
+                    subprocess.run(['open', str(markdown_path)], check=True)
+                elif os.name == 'posix':
+                    subprocess.run(['xdg-open', str(markdown_path)], check=True)
+                else:
+                    os.startfile(str(markdown_path))
                 
                 while True:
                     proceed = input("\nPress Enter when you're done editing (or 'q' to abort): ").lower()
@@ -333,8 +338,8 @@ p {{
 </head>
 <body>
     <div class="cover">
-        <h1>{title}</h1>
-        <p>{authors}</p>
+        <h1>{xml_escape(title)}</h1>
+        <p>{xml_escape(authors) if authors else ''}</p>
     </div>
 </body>
 </html>"""
@@ -355,7 +360,7 @@ def get_TOC_XML(default_css_filenames, markdown_filenames):
     for i,md_filename in enumerate(markdown_filenames):
         stem = md_filename.split(".")[0]
         href = quote("s{:05d}-{}.xhtml".format(i, stem))
-        toc_xhtml += """<li><a href="{}">{}</a></li>""".format(href, stem)
+        toc_xhtml += """<li><a href="{}">{}</a></li>""".format(href, xml_escape(stem))
     toc_xhtml += """</ol>\n</nav>\n</body>\n</html>"""
 
     return toc_xhtml
@@ -377,7 +382,7 @@ def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
         stem = md_filename.split(".")[0]
         src = quote("s{:05d}-{}.xhtml".format(i, stem))
         toc_ncx += """<navPoint id="navpoint-{}" playOrder="{}">\n""".format(i, i + 1)
-        toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(stem)
+        toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(xml_escape(stem))
         toc_ncx += """<content src="{}"/>""".format(src)
         toc_ncx += """ </navPoint>"""
     toc_ncx += """</navMap>\n</ncx>"""
