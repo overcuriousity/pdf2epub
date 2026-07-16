@@ -30,7 +30,15 @@ Python 3.13 is recommended.
 `marker-pdf` constrains `Pillow<11.0.0`, and Pillow only ships Python 3.14
 wheels from 11.3.0 onward. On Python 3.10–3.13 every dependency installs as a
 prebuilt wheel. On 3.14, pip has to build Pillow from source instead: this
-works, but it is slower and requires a working C toolchain.
+works, but it is slower and requires a working C toolchain plus the image
+library headers Pillow links against. On Debian/Ubuntu install them first:
+
+```bash
+sudo apt install libjpeg-dev zlib1g-dev libtiff-dev libfreetype6-dev libwebp-dev
+```
+
+Without these headers the install fails with
+`RequiredDependencyException: The headers or library files could not be found for jpeg`.
 
 ## 💻 Installation
 
@@ -73,6 +81,30 @@ print(torch.cuda.is_available())  # Should return True for NVIDIA
 print(torch.backends.mps.is_available())  # Should return True for Apple Silicon
 print(torch.version.hip)  # Should print ROCm version for AMD
 ```
+
+### 🐳 Docker
+
+A CPU-only image can be built from the included `Dockerfile`:
+
+```bash
+docker build -t pdf2epub .
+```
+
+Run it with your PDFs mounted at `/data` and a model cache volume (marker-pdf
+downloads its models on first run):
+
+```bash
+docker run -it --rm \
+  -v "$(pwd)":/data \
+  -v pdf2epub-models:/models \
+  pdf2epub input.pdf
+```
+
+`-it` is required for EPUB generation because metadata is prompted
+interactively; with `--skip-epub` it can run non-interactively.
+
+Tagged releases are also published to
+`ghcr.io/overcuriousity/pdf2epub` by the Docker workflow.
 
 ## 🚀 Usage
 

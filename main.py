@@ -11,7 +11,7 @@ import torch
 def main():
     if torch.cuda.is_available():
         print("CUDA is available. Using GPU for processing.")
-    elif torch.mps.is_available():
+    elif torch.backends.mps.is_available():
         print("MPS is available. Using Apple Silicon for processing.")
     else:
         print("CUDA is not available. Using CPU for processing.")
