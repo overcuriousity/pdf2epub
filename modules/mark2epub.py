@@ -1,696 +1,281 @@
-import markdown
-import os
-from xml.dom import minidom
-import zipfile
-import sys
-import json
-from PIL import Image
-import regex as re
+#!/usr/bin/env python3
+"""
+High-fidelity EPUB 3 compilation module using Pandoc.
+Replaces the legacy pipeline with robust MathML compilation and semantic splitting.
+"""
+
 from pathlib import Path
-from datetime import datetime, timezone
+import json
+import shutil
 import subprocess
-from typing import Dict, Optional
-from urllib.parse import quote
-from xml.sax.saxutils import escape as xml_escape
-import latex2mathml.converter
+import sys
+import tempfile
+import regex as re
+from typing import Optional, Dict, Any
 
-def get_user_input(prompt: str, default: str = "") -> str:
-    """Get user input with a default value."""
-    user_input = input(f"{prompt} [{default}]: ").strip()
-    return user_input if user_input else default
+DEFAULT_EPUB_CSS = """@charset "UTF-8";
 
-def get_metadata_from_user(existing_metadata: Optional[Dict] = None) -> Dict:
-    """Interactively collect metadata from user with defaults from existing metadata."""
-    if existing_metadata is None:
-        existing_metadata = {}
-    
-    metadata = existing_metadata.get("metadata", {})
-    
-    print("\nPlease provide the following metadata for your EPUB (press Enter to use default value):")
-    
-    fields = {
-        "dc:title": ("Title", metadata.get("dc:title", "Untitled Document")),
-        "dc:creator": ("Author(s)", metadata.get("dc:creator", "Unknown Author")),
-        "dc:identifier": ("Unique Identifier", metadata.get("dc:identifier", f"id-{datetime.now().strftime('%Y%m%d%H%M%S')}")),
-        "dc:language": ("Language (e.g., en, de, fr)", metadata.get("dc:language", "en")),
-        "dc:rights": ("Rights", metadata.get("dc:rights", "All rights reserved")),
-        "dc:publisher": ("Publisher", metadata.get("dc:publisher", "PDF2EPUB")),
-        "dc:date": ("Publication Date (YYYY-MM-DD)", metadata.get("dc:date", datetime.now().strftime("%Y-%m-%d")))
-    }
-    
-    updated_metadata = {}
-    for key, (prompt, default) in fields.items():
-        value = get_user_input(prompt, default)
-        updated_metadata[key] = value
-        
-    return {
-        "metadata": updated_metadata,
-        "default_css": existing_metadata.get("default_css", ["style.css"]),
-        "chapters": existing_metadata.get("chapters", []),
-        "cover_image": existing_metadata.get("cover_image", None)
-    }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Charter", "Georgia", "Palatino", serif;
+    line-height: 1.6;
+    margin: 4% 5%;
+}
 
-def review_markdown(markdown_path: Path) -> tuple[bool, str]:
-    """Ask user if they want to review the markdown file."""
-    content = markdown_path.read_text(encoding='utf-8')
-    
-    while True:
-        response = input("\nWould you like to review the markdown file before conversion? (y/n): ").lower()
-        if response in ['y', 'yes']:
-            try:
-                if sys.platform == 'darwin':
-                    subprocess.run(['open', str(markdown_path)], check=True)
-                elif os.name == 'posix':
-                    subprocess.run(['xdg-open', str(markdown_path)], check=True)
-                else:
-                    os.startfile(str(markdown_path))
-                
-                while True:
-                    proceed = input("\nPress Enter when you're done editing (or 'q' to abort): ").lower()
-                    if proceed == 'q':
-                        return False, content
-                    elif proceed == '':
-                        updated_content = markdown_path.read_text(encoding='utf-8')
-                        return True, updated_content
-            except Exception as e:
-                print(f"\nError opening markdown file: {e}")
-                print("Proceeding with conversion...")
-                return True, content
-        elif response in ['n', 'no']:
-            return True, content
-        else:
-            print("Please enter 'y' or 'n'")
+h1, h2, h3, h4, h5, h6 {
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Arial", sans-serif;
+    font-weight: 600;
+    line-height: 1.25;
+    margin-top: 1.6em;
+    margin-bottom: 0.5em;
+    page-break-after: avoid;
+    break-after: avoid;
+}
 
-def build_image_lookup(images_dir: Path) -> dict:
-    """Build a {lowercase_name: actual_path} map for O(1) case-insensitive lookups."""
-    lookup = {}
-    try:
-        for entry in images_dir.iterdir():
-            lookup[entry.name.lower()] = entry
-    except FileNotFoundError:
-        pass
-    return lookup
+h1 { font-size: 1.8rem; }
+h2 { font-size: 1.4rem; }
+h3 { font-size: 1.2rem; }
 
-def process_markdown_for_images(markdown_text: str, work_dir: Path) -> tuple[str, list[str]]:
-    """Process markdown content to find image references."""
-    image_pattern = r'!\[(.*?)\]\((.*?)\)'
-    images_found = []
-    modified_text = markdown_text
-    images_dir = work_dir / 'images'
-    lookup = build_image_lookup(images_dir)
+p {
+    margin: 0 0 0.8em 0;
+    text-align: justify;
+    text-justify: inter-word;
+    text-indent: 1.5em;
+    orphans: 2;
+    widows: 2;
+    hyphens: auto;
+    -webkit-hyphens: auto;
+}
 
-    for match in re.finditer(image_pattern, markdown_text):
-        alt_text, image_path = match.groups()
-        img_path = Path(image_path.strip())
+h1 + p, h2 + p, h3 + p, h4 + p, hr + p, blockquote + p {
+    text-indent: 0;
+}
 
-        actual = lookup.get(img_path.name.lower())
-        if actual is not None:
-            images_found.append(actual.name)
-            new_ref = f'![{alt_text}](images/{actual.name})'
-            modified_text = modified_text.replace(match.group(0), new_ref)
-        else:
-            print(f"Warning: Image not found: {images_dir / img_path.name}")
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1.2em auto;
+}
 
-    return modified_text, images_found
+pre, code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.85em;
+}
 
-def copy_and_optimize_image(src_path: Path, dest_path: Path, max_dimension: int = 1800) -> None:
-    """Copy image to destination path with optimization for EPUB."""
-    try:
-        with Image.open(src_path) as img:
-            if img.mode == 'RGBA':
-                img = img.convert('RGB')
-                
-            ratio = min(max_dimension / max(img.size[0], img.size[1]), 1.0)
-            new_size = tuple(int(dim * ratio) for dim in img.size)
-            
-            if ratio < 1.0:
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-            
-            if src_path.suffix.lower() in ['.jpg', '.jpeg']:
-                img.save(dest_path, 'JPEG', quality=85, optimize=True)
-            elif src_path.suffix.lower() == '.png':
-                img.save(dest_path, 'PNG', optimize=True)
-            else:
-                dest_path = dest_path.with_suffix('.jpg')
-                img.save(dest_path, 'JPEG', quality=85, optimize=True)
-                
-    except Exception as e:
-        print(f"Error processing image {src_path}: {e}")
-        raise
+pre {
+    padding: 0.8em;
+    overflow-x: auto;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.12);
+    white-space: pre-wrap;
+    word-break: break-all;
+}
 
-def update_package_manifest(doc: minidom.Document, image_filenames: list[str], 
-                          manifest: minidom.Element) -> None:
-    """
-    Update package manifest with image items, ensuring proper media types.
-    """
-    for i, image_filename in enumerate(image_filenames):
-        item = doc.createElement('item')
-        item.setAttribute('id', f"image-{i:05d}")
-        item.setAttribute('href', f"images/{image_filename}")
-        
-        # Set appropriate media type based on file extension
-        ext = Path(image_filename).suffix.lower()
-        if ext in ['.jpg', '.jpeg']:
-            media_type = 'image/jpeg'
-        elif ext == '.png':
-            media_type = 'image/png'
-        elif ext == '.gif':
-            media_type = 'image/gif'
-        else:
-            print(f"Warning: Unsupported image type {ext} for {image_filename}")
-            continue
-            
-        item.setAttribute('media-type', media_type)
-        manifest.appendChild(item)
-        
-def get_all_filenames(the_dir, extensions=[]):
-    if not os.path.exists(the_dir):
-        return []
-    all_files = [x for x in os.listdir(the_dir)]
-    all_files = [x for x in all_files if x.split(".")[-1] in extensions]
-    return all_files
+code {
+    padding: 0.2em 0.4em;
+    background: rgba(128, 128, 128, 0.12);
+    border-radius: 3px;
+}
 
-def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], description_data=None):
-    doc = minidom.Document()
-
-    package = doc.createElement('package')
-    package.setAttribute('xmlns',"http://www.idpf.org/2007/opf")
-    package.setAttribute('version',"3.0")
-    package.setAttribute('xml:lang',"en")
-    package.setAttribute("unique-identifier","pub-id")
-
-    ## Now building the metadata
-
-    metadata = doc.createElement('metadata')
-    metadata.setAttribute('xmlns:dc', 'http://purl.org/dc/elements/1.1/')
-
-    for k,v in description_data["metadata"].items():
-        if len(v):
-            x = doc.createElement(k)
-            for metadata_type,id_label in [("dc:title","title"),("dc:creator","creator"),("dc:identifier","pub-id")]:
-                if k==metadata_type:
-                    x.setAttribute('id',id_label)
-            x.appendChild(doc.createTextNode(v))
-            metadata.appendChild(x)
-
-    # Required by EPUB 3: dcterms:modified timestamp
-    modified_meta = doc.createElement('meta')
-    modified_meta.setAttribute('property', 'dcterms:modified')
-    modified_meta.appendChild(doc.createTextNode(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
-    metadata.appendChild(modified_meta)
-
-
-    ## Now building the manifest
-
-    manifest = doc.createElement('manifest')
-
-    ## TOC.xhtml file for EPUB 3
-    x = doc.createElement('item')
-    x.setAttribute('id',"toc")
-    x.setAttribute('properties',"nav")
-    x.setAttribute('href',"TOC.xhtml")
-    x.setAttribute('media-type',"application/xhtml+xml")
-    manifest.appendChild(x)
-
-    ## Ensure retrocompatibility by also providing a TOC.ncx file
-    x = doc.createElement('item')
-    x.setAttribute('id',"ncx")
-    x.setAttribute('href',"toc.ncx")
-    x.setAttribute('media-type',"application/x-dtbncx+xml")
-    manifest.appendChild(x)
-
-    x = doc.createElement('item')
-    x.setAttribute('id',"titlepage")
-    x.setAttribute('href',"titlepage.xhtml")
-    x.setAttribute('media-type',"application/xhtml+xml")
-    manifest.appendChild(x)
-
-    for i,md_filename in enumerate(md_filenames):
-        x = doc.createElement('item')
-        x.setAttribute('id',"s{:05d}".format(i))
-        x.setAttribute('href', quote("s{:05d}-{}.xhtml".format(i, md_filename.split(".")[0])))
-        x.setAttribute('media-type',"application/xhtml+xml")
-        manifest.appendChild(x)
-
-    for i,image_filename in enumerate(image_filenames):
-        x = doc.createElement('item')
-        x.setAttribute('id',"image-{:05d}".format(i))
-        x.setAttribute('href', "images/{}".format(quote(image_filename)))
-        ext = Path(image_filename).suffix.lower()
-        if ext == '.gif':
-            x.setAttribute('media-type',"image/gif")
-        elif ext in ['.jpg', '.jpeg']:
-            x.setAttribute('media-type',"image/jpeg")
-        elif ext == '.png':
-            x.setAttribute('media-type',"image/png")
-        if image_filename==description_data["cover_image"]:
-            x.setAttribute('properties',"cover-image")
-
-            ## Ensure compatibility by also providing a meta tag in the metadata
-            y = doc.createElement('meta')
-            y.setAttribute('name',"cover")
-            y.setAttribute('content',"image-{:05d}".format(i))
-            metadata.appendChild(y)
-        manifest.appendChild(x)
-
-    for i,css_filename in enumerate(css_filenames):
-        x = doc.createElement('item')
-        x.setAttribute('id',"css-{:05d}".format(i))
-        x.setAttribute('href',"css/{}".format(css_filename))
-        x.setAttribute('media-type',"text/css")
-        manifest.appendChild(x)
-
-    ## Now building the spine
-
-    spine = doc.createElement('spine')
-    spine.setAttribute('toc', "ncx")
-
-    x = doc.createElement('itemref')
-    x.setAttribute('idref',"titlepage")
-    x.setAttribute('linear',"yes")
-    spine.appendChild(x)
-    for i,_ in enumerate(md_filenames):
-        x = doc.createElement('itemref')
-        x.setAttribute('idref',"s{:05d}".format(i))
-        x.setAttribute('linear',"yes")
-        spine.appendChild(x)
-
-    guide = doc.createElement('guide')
-    x = doc.createElement('reference')
-    x.setAttribute('type',"cover")
-    x.setAttribute('title',"Cover image")
-    x.setAttribute('href',"titlepage.xhtml")
-    guide.appendChild(x)
-
-
-    package.appendChild(metadata)
-    package.appendChild(manifest)
-    package.appendChild(spine)
-    package.appendChild(guide)
-    doc.appendChild(package)
-
-    return doc.toprettyxml()
-
-
-def get_container_XML():
-    container_data = """<?xml version="1.0" encoding="UTF-8" ?>\n"""
-    container_data += """<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n"""
-    container_data += """<rootfiles>\n"""
-    container_data += """<rootfile full-path="OPS/package.opf" media-type="application/oebps-package+xml"/>\n"""
-    container_data += """</rootfiles>\n</container>"""
-    return container_data
-
-def get_coverpage_XML(title, authors):
-    """Generate a simple cover page with title and optional author input."""
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
-<head>
-<title>Cover Page</title>
-<style type="text/css">
-body {{ 
-    margin: 0;
+pre code {
     padding: 0;
-    height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    font-family: serif;
-}}
-.cover {{
-    padding: 3em;
-    text-align: center;
-    border: 1px solid #ccc;
-    max-width: 80%;
-}}
-h1 {{
-    font-size: 2em;
-    margin-bottom: 1em;
-    line-height: 1.2;
-    color: #333;
-}}
-p {{
-    font-size: 1.2em;
+    background: transparent;
+}
+
+blockquote {
+    margin: 1.2em 0 1.2em 1.5em;
+    padding-left: 1em;
+    border-left: 3px solid rgba(128, 128, 128, 0.4);
     font-style: italic;
-    color: #666;
-    line-height: 1.4;
-}}
-</style>
-</head>
-<body>
-    <div class="cover">
-        <h1>{xml_escape(title)}</h1>
-        <p>{xml_escape(authors) if authors else ''}</p>
-    </div>
-</body>
-</html>"""
+}
 
-def get_TOC_XML(default_css_filenames, markdown_filenames):
-    ## Returns the XML data for the TOC.xhtml file
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.5em 0;
+    font-size: 0.9em;
+}
 
-    toc_xhtml = """<?xml version="1.0" encoding="UTF-8"?>\n"""
-    toc_xhtml += """<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">\n"""
-    toc_xhtml += """<head>\n<meta http-equiv="default-style" content="text/html; charset=utf-8"/>\n"""
-    toc_xhtml += """<title>Contents</title>\n"""
+th, td {
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    padding: 0.5em 0.8em;
+}
 
-    for css_filename in default_css_filenames:
-        toc_xhtml += """<link rel="stylesheet" href="css/{}" type="text/css"/>\n""".format(css_filename)
+th {
+    background: rgba(128, 128, 128, 0.1);
+}
 
-    toc_xhtml += """</head>\n<body>\n"""
-    toc_xhtml += """<nav epub:type="toc" role="doc-toc" id="toc">\n<h2>Contents</h2>\n<ol epub:type="list">"""
-    for i,md_filename in enumerate(markdown_filenames):
-        stem = md_filename.split(".")[0]
-        href = quote("s{:05d}-{}.xhtml".format(i, stem))
-        toc_xhtml += """<li><a href="{}">{}</a></li>""".format(href, xml_escape(stem))
-    toc_xhtml += """</ol>\n</nav>\n</body>\n</html>"""
+.math-display {
+    display: block;
+    margin: 1.2em 0;
+    overflow-x: auto;
+    text-align: center;
+}
 
-    return toc_xhtml
+.math-inline {
+    display: inline;
+}
+"""
 
-def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
-    ## Returns the XML data for the TOC.ncx file
+class PandocNotFoundError(RuntimeError):
+    pass
 
-    toc_ncx = """<?xml version="1.0" encoding="UTF-8"?>\n"""
-    toc_ncx += """<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" xml:lang="en" version="2005-1">\n"""
-    toc_ncx += """<head>\n"""
-    toc_ncx += """<meta name="dtb:uid" content="{}"/>\n""".format(xml_escape(uid))
-    toc_ncx += """<meta name="dtb:depth" content="1"/>\n"""
-    toc_ncx += """<meta name="dtb:totalPageCount" content="0"/>\n"""
-    toc_ncx += """<meta name="dtb:maxPageNumber" content="0"/>\n"""
-    toc_ncx += """</head>\n"""
-    toc_ncx += """<docTitle><text>{}</text></docTitle>\n""".format(xml_escape(title))
-    toc_ncx += """<navMap>\n"""
-    for i,md_filename in enumerate(markdown_filenames):
-        stem = md_filename.split(".")[0]
-        src = quote("s{:05d}-{}.xhtml".format(i, stem))
-        toc_ncx += """<navPoint id="navpoint-{}" playOrder="{}">\n""".format(i, i + 1)
-        toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(xml_escape(stem))
-        toc_ncx += """<content src="{}"/>""".format(src)
-        toc_ncx += """ </navPoint>"""
-    toc_ncx += """</navMap>\n</ncx>"""
+def check_pandoc_installed() -> str:
+    pandoc_path = shutil.which("pandoc")
+    if not pandoc_path:
+        raise PandocNotFoundError(
+            "\n[CRITICAL ERROR] Pandoc not found in system PATH.\n"
+            "To run outside Docker, install Pandoc 3.x:\n"
+            "  - macOS: brew install pandoc\n"
+            "  - Ubuntu/Debian: sudo apt-get install pandoc\n"
+            "  - Windows: winget install JohnMacFarlane.Pandoc\n"
+            "Or run via the official project Docker image."
+        )
+    return pandoc_path
 
-    return toc_ncx
+def sanitize_math_syntax(text: str) -> str:
+    """
+    Fix archaic marker-pdf TeX constructs (such as \\rm)
+    that cause failures in Pandoc's MathML parser.
+    """
+    text = re.sub(r'\{\\rm\s+([^}]+)\}', r'\\mathrm{\1}', text)
+    text = re.sub(r'\\rm\s+([a-zA-Z0-9]+)', r'\\mathrm{\1}', text)
+    text = re.sub(r'\\rm\b', r'\\mathrm', text)
+    return text
 
-def convert_math_to_mathml(html_text: str) -> str:
-    """Replace LaTeX math expressions in HTML with MathML, skipping code blocks."""
-    # Mask <pre>/<code> blocks so their $ delimiters are never treated as math
-    placeholders = {}
-    counter = [0]
+def resolve_metadata(markdown_dir: Path, md_path: Path) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "title": md_path.stem.replace("_", " ").title(),
+        "creator": "Unknown Author",
+        "language": "en",
+        "publisher": "PDF2EPUB"
+    }
 
-    def mask(m):
-        key = f"\x00MASK{counter[0]}\x00"
-        counter[0] += 1
-        placeholders[key] = m.group(0)
-        return key
-
-    masked = re.sub(r'<pre[\s\S]*?</pre>|<code[\s\S]*?</code>', mask, html_text, flags=re.DOTALL)
-
-    def try_convert(latex):
+    desc_file = markdown_dir / "description.json"
+    if desc_file.exists():
         try:
-            return latex2mathml.converter.convert(latex)
+            with open(desc_file, "r", encoding="utf-8") as f:
+                data = json.load(f).get("metadata", {})
+                if data.get("dc:title"): metadata["title"] = data["dc:title"]
+                if data.get("dc:creator"): metadata["creator"] = data["dc:creator"]
+                if data.get("dc:language"): metadata["language"] = data["dc:language"]
         except Exception:
-            return None
+            pass
 
-    # Standalone display math that Markdown wrapped in <p>: replace the whole
-    # paragraph to avoid invalid XHTML like <p><div>...</div></p>
-    def replace_display_paragraph(m):
-        mathml = try_convert(m.group(1))
-        return f'<div class="math-display">{mathml}</div>' if mathml else m.group(0)
+    # If in an interactive terminal, allow confirmation/editing
+    if sys.stdin.isatty():
+        prompt = input(f"Book Title [{metadata['title']}]: ").strip()
+        if prompt: metadata["title"] = prompt
+        author = input(f"Author(s) [{metadata['creator']}]: ").strip()
+        if author: metadata["creator"] = author
 
-    # Remaining $$...$$ (inside phrasing content): use <span> to stay valid
-    def replace_display_inline(m):
-        mathml = try_convert(m.group(1))
-        return f'<span class="math-display">{mathml}</span>' if mathml else m.group(0)
+    return metadata
 
-    # Inline $...$
-    def replace_inline(m):
-        mathml = try_convert(m.group(1))
-        return f'<span class="math-inline">{mathml}</span>' if mathml else m.group(0)
+def find_cover_image(images_dir: Path) -> Optional[Path]:
+    """Dynamically identifies the best candidate for cover image (returns absolute path)."""
+    if not images_dir.exists():
+        return None
 
-    masked = re.sub(r'<p>\s*\$\$(.*?)\$\$\s*</p>', replace_display_paragraph, masked, flags=re.DOTALL)
-    masked = re.sub(r'\$\$(.*?)\$\$', replace_display_inline, masked, flags=re.DOTALL)
-    masked = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', replace_inline, masked, flags=re.DOTALL)
+    # 1. Look for files with explicit cover names
+    for f in images_dir.iterdir():
+        if f.is_file() and "cover" in f.name.lower() and f.suffix.lower() in [".jpg", ".jpeg", ".png"]:
+            return f.resolve()
 
-    for key, original in placeholders.items():
-        masked = masked.replace(key, original)
-
-    return masked
-
-def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], content: Optional[str] = None) -> tuple[str, list[str]]:
-    """
-    Convert markdown chapter to XHTML and process images.
-    Returns tuple of (XHTML content, list of images referenced in chapter)
-    
-    Args:
-        work_dir: Working directory containing markdown files
-        md_filename: Name of markdown file
-        css_filenames: List of CSS files to include
-        content: Optional pre-loaded markdown content. If None, content is read from file
-    """
-    work_dir_path = Path(work_dir)
-    
-    if content is None:
-        with open(work_dir_path / md_filename, "r", encoding="utf-8") as f:
-            markdown_data = f.read()
-    else:
-        markdown_data = content
-    
-    # Process markdown for images and get list of referenced images
-    markdown_data, chapter_images = process_markdown_for_images(markdown_data, work_dir_path)
-    
-    # Convert to HTML
-    html_text = markdown.markdown(
-        markdown_data,
-        extensions=["codehilite", "tables", "fenced_code", "footnotes"],
-        extension_configs={"codehilite": {"guess_lang": False}}
+    # 2. Search for any image generated from page 0 of the PDF (sorted numerically)
+    page_zero_candidates = sorted(
+        [f for f in images_dir.iterdir() if f.is_file() and f.name.startswith("_page_0_") and f.suffix.lower() in [".jpg", ".jpeg", ".png"]],
+        key=lambda x: x.name
     )
+    if page_zero_candidates:
+        return page_zero_candidates[0].resolve()
 
-    # Convert LaTeX math to MathML for EPUB readers
-    html_text = convert_math_to_mathml(html_text)
-
-    # Generate XHTML wrapper
-    xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xmlns:m="http://www.w3.org/1998/Math/MathML" lang="en">
-<head>
-    <meta http-equiv="default-style" content="text/html; charset=utf-8"/>
-    {''.join(f'<link rel="stylesheet" href="css/{css}" type="text/css" media="all"/>' for css in css_filenames)}
-</head>
-<body>
-{html_text}
-</body>
-</html>"""
-
-    return xhtml, chapter_images
-
-
+    return None
 
 def convert_to_epub(markdown_dir: Path, output_path: Path) -> None:
     """
-    Convert markdown files and images to EPUB format.
+    Compiles artifacts generated by Marker into an EPUB 3 file using Pandoc.
+    Maintains strict compatibility with main.py invocations.
     """
-    if not markdown_dir.exists():
+    check_pandoc_installed()
+
+    # Normalize markdown_dir to absolute path from the start
+    markdown_dir = Path(markdown_dir).resolve()
+    if not markdown_dir.exists() or not markdown_dir.is_dir():
         raise FileNotFoundError(f"Markdown directory not found: {markdown_dir}")
+
+    md_files = sorted(list(markdown_dir.glob("*.md")))
+    if not md_files:
+        raise ValueError(f"No .md files found in: {markdown_dir}")
+
+    primary_md = md_files[0]
+
+    # Normalize destination to absolute path
+    output_path = Path(output_path).resolve()
+    if output_path.is_dir() or not output_path.suffix:
+        output_path.mkdir(parents=True, exist_ok=True)
+        epub_target = (markdown_dir / f"{markdown_dir.name}.epub").resolve()
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        epub_target = output_path.resolve()
+
+    # Sanitize Markdown in a temporary file
+    raw_content = primary_md.read_text(encoding="utf-8")
+    sanitized_content = sanitize_math_syntax(raw_content)
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as tmp_md, \
+         tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".css", delete=False) as tmp_css:
         
-    if not list(markdown_dir.glob('*.md')):
-        raise ValueError(f"No markdown files found in: {markdown_dir}")
-    
-    # Generate EPUB file
-    epub_path = markdown_dir / f"{markdown_dir.name}.epub"
-    main([str(markdown_dir), str(epub_path)])
+        tmp_md_path = Path(tmp_md.name).resolve()
+        tmp_css_path = Path(tmp_css.name).resolve()
 
-def main(args):
-    if len(args) < 2:
-        print("\nUsage:\n    python md2epub.py <markdown_directory> <output_file.epub>")
-        exit(1)
+        tmp_md.write(sanitized_content)
+        tmp_md.flush()
 
-    work_dir = args[0]
-    output_path = args[1]
-
-    images_dir = os.path.join(work_dir, 'images/')
-    css_dir = os.path.join(work_dir, 'css/')
+        tmp_css.write(DEFAULT_EPUB_CSS)
+        tmp_css.flush()
 
     try:
-        # Reading/Creating the JSON file containing the description of the eBook
-        description_path = os.path.join(work_dir, "description.json")
-        existing_metadata = {}
-        
-        if os.path.exists(description_path):
-            with open(description_path, 'r', encoding='utf-8') as f:
-                existing_metadata = json.load(f)
-        
-        # Get metadata from user
-        json_data = get_metadata_from_user(existing_metadata)
-        
-        # Find all markdown files if not already in metadata
-        if not json_data["chapters"]:
-            markdown_files = [f for f in os.listdir(work_dir) if f.endswith('.md')]
-            for md_file in sorted(markdown_files):
-                json_data["chapters"].append({
-                    "markdown": md_file,
-                    "css": ""
-                })
-        
-        # Save the updated description.json
-        with open(description_path, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, indent=2)
-        
-        # Review markdown files and store updated content
-        chapter_contents = {}
-        for chapter in json_data["chapters"]:
-            md_path = Path(work_dir) / chapter["markdown"]
-            should_continue, content = review_markdown(md_path)
-            if not should_continue:
-                print("\nConversion aborted by user.")
-                return
-            chapter_contents[chapter["markdown"]] = content
+        meta = resolve_metadata(markdown_dir, primary_md)
+        images_dir = (markdown_dir / "images").resolve()
 
-        # Get title and author
-        title = json_data["metadata"].get("dc:title", "Untitled Document")
-        authors = json_data["metadata"].get("dc:creator", None)
+        cmd = [
+            "pandoc",
+            str(tmp_md_path),
+            "-o", str(epub_target),
+            "-f", "markdown+smart",
+            "-t", "epub3",
+            "--split-level=2",
+            "--toc",
+            "--toc-depth=3",
+            "--math-method=mathml",  # Official Pandoc 3.x syntax without deprecation warning
+            f"--resource-path=.:images:{markdown_dir}:{images_dir}",
+            f"--css={tmp_css_path}",
+            "-M", f"title={meta['title']}",
+            "-M", f"author={meta['creator']}",
+            "-M", f"lang={meta['language']}",
+            "-M", f"publisher={meta['publisher']}"
+        ]
 
-        # Compile list of files
-        all_md_filenames = []
-        all_css_filenames = json_data["default_css"][:]
-        for chapter in json_data["chapters"]:
-            if chapter["markdown"] not in all_md_filenames:
-                all_md_filenames.append(chapter["markdown"])
-            if len(chapter["css"]) and (chapter["css"] not in all_css_filenames):
-                all_css_filenames.append(chapter["css"])
-        
-        all_image_filenames = get_all_filenames(images_dir, extensions=["gif", "jpg", "jpeg", "png"])
+        cover_img = find_cover_image(images_dir)
+        if cover_img and cover_img.exists():
+            cmd.append(f"--epub-cover-image={cover_img}")
 
-        # First process all chapters and images
-        images_dir = Path(work_dir) / 'images'
-        epub_images_dir = Path(work_dir) / 'epub_images'
-        processed_images = {}  # Store processed image data
-        all_referenced_images = set()
-        chapter_data = {}  # Store processed chapter data
+        print(f"\n[Pandoc] Starting EPUB 3 compilation: {epub_target.name}")
+        result = subprocess.run(
+            cmd,
+            cwd=str(markdown_dir),
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        if result.stderr:
+            print(f"[Pandoc Warning]:\n{result.stderr}", file=sys.stderr)
 
-        # First pass: Process chapters and collect image references
-        print("\nProcessing chapters and collecting image references...")
-        for i, chapter in enumerate(json_data["chapters"]):
-            css_files = json_data["default_css"][:]
-            if chapter["css"]:
-                css_files.append(chapter["css"])
-                
-            # Process chapter content
-            chapter_xhtml, chapter_images = get_chapter_XML(
-                work_dir, 
-                chapter["markdown"], 
-                css_files,
-                content=chapter_contents[chapter["markdown"]]
-            )
-            chapter_data[chapter["markdown"]] = chapter_xhtml
-            all_referenced_images.update(chapter_images)
+        print(f"[Pandoc] EPUB 3 generated successfully: {epub_target}")
 
-        # Process and optimize images
-        print("\nProcessing and optimizing images...")
-        if images_dir.exists() and all_referenced_images:
-            epub_images_dir.mkdir(exist_ok=True)
-            
-            for image in all_referenced_images:
-                src_path = images_dir / image
-                if src_path.exists():
-                    try:
-                        dest_path = epub_images_dir / image
-                        copy_and_optimize_image(src_path, dest_path)
-                        
-                        # Store processed image data
-                        with open(dest_path, "rb") as f:
-                            processed_images[image] = f.read()
-                    except Exception as e:
-                        print(f"Warning: Failed to process image {image}: {e}")
-                else:
-                    print(f"Warning: Referenced image not found: {src_path}")
-            
-            # Cleanup temporary directory
-            import shutil
-            shutil.rmtree(epub_images_dir, ignore_errors=True)
-
-        # Now create the EPUB file with all prepared content
-        print("\nCreating EPUB file...")
-        with zipfile.ZipFile(output_path, "w") as epub:
-            # Write mimetype (must be first and uncompressed)
-            epub.writestr("mimetype", "application/epub+zip")
-
-            # Write container.xml
-            epub.writestr("META-INF/container.xml", get_container_XML(), zipfile.ZIP_DEFLATED)
-
-            # Write package.opf
-            epub.writestr("OPS/package.opf", 
-                get_packageOPF_XML(
-                    md_filenames=all_md_filenames,
-                    image_filenames=all_image_filenames,
-                    css_filenames=all_css_filenames,
-                    description_data=json_data
-                ), 
-                zipfile.ZIP_DEFLATED
-            )
-
-            # Write cover page
-            coverpage_data = get_coverpage_XML(title, authors)
-            epub.writestr("OPS/titlepage.xhtml", coverpage_data.encode('utf-8'), zipfile.ZIP_DEFLATED)
-
-            # Write processed chapters
-            print("Writing chapters...")
-            for i, chapter in enumerate(json_data["chapters"]):
-                print(f"  Writing chapter {i+1}/{len(json_data['chapters'])}: {chapter['markdown']}")
-                epub.writestr(
-                    f"OPS/s{i:05d}-{chapter['markdown'].split('.')[0]}.xhtml",
-                    chapter_data[chapter["markdown"]].encode('utf-8'),
-                    zipfile.ZIP_DEFLATED
-                )
-
-            # Write processed images
-            if processed_images:
-                print(f"Writing {len(processed_images)} processed images...")
-                for image_name, image_data in processed_images.items():
-                    epub.writestr(f"OPS/images/{image_name}", image_data, zipfile.ZIP_DEFLATED)
-
-            # Write TOC files
-            print("Writing table of contents...")
-            epub.writestr("OPS/TOC.xhtml", 
-                get_TOC_XML(json_data["default_css"], all_md_filenames),
-                zipfile.ZIP_DEFLATED
-            )
-            
-            epub.writestr("OPS/toc.ncx",
-                get_TOCNCX_XML(
-                    all_md_filenames,
-                    uid=json_data["metadata"].get("dc:identifier", ""),
-                    title=json_data["metadata"].get("dc:title", "")
-                ),
-                zipfile.ZIP_DEFLATED
-            )
-
-            # Copy remaining images that weren't referenced in markdown
-            remaining_images = set(all_image_filenames) - set(processed_images.keys())
-            if remaining_images and os.path.exists(images_dir):
-                print(f"Writing {len(remaining_images)} additional images...")
-                for image in remaining_images:
-                    with open(os.path.join(images_dir, image), "rb") as f:
-                        epub.writestr(f"OPS/images/{image}", f.read(), zipfile.ZIP_DEFLATED)
-
-            # Copy CSS files; write a default style.css for any that are missing
-            default_css_content = b"""body { font-family: serif; line-height: 1.5; margin: 5%; }
-h1, h2, h3, h4, h5, h6 { font-family: sans-serif; }
-img { max-width: 100%; height: auto; }
-pre, code { font-family: monospace; font-size: 0.9em; }
-"""
-            print(f"Writing {len(all_css_filenames)} CSS files...")
-            for css in all_css_filenames:
-                css_path = os.path.join(css_dir, css)
-                if os.path.exists(css_path):
-                    with open(css_path, "rb") as f:
-                        epub.writestr(f"OPS/css/{css}", f.read(), zipfile.ZIP_DEFLATED)
-                else:
-                    epub.writestr(f"OPS/css/{css}", default_css_content, zipfile.ZIP_DEFLATED)
-
-        print(f"\nEPUB creation complete: {output_path}")
-        
-    except Exception:
-        import traceback
-        print(f"Error processing {work_dir}:")
-        print(traceback.format_exc())
+    except subprocess.CalledProcessError as e:
+        print(f"[Pandoc ERROR]: Compilation failed.\n{e.stderr}", file=sys.stderr)
         raise
-
-if __name__ == "__main__":
-    main(sys.argv[1:])
+    finally:
+        if tmp_md_path.exists(): tmp_md_path.unlink()
+        if tmp_css_path.exists(): tmp_css_path.unlink()

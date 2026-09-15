@@ -9,19 +9,26 @@ Convert PDF files to nicely structured Markdown and EPUB format with intelligent
 - 📊 Table detection and formatting
 - 🖼️ Image extraction and optimization
 - 📝 Clean markdown output with preserved structure
-- 📱 EPUB generation with customizable styling
+- 📱 EPUB 3 generation with native MathML support powered by Pandoc
 - 🌍 Multi-language support
 - 🚀 GPU acceleration support (NVIDIA & AMD)
 - 🍎 Apple Silicon support
 
 ## 🛠️ Dependencies
 
+### System Dependencies (for native execution)
+- **[Pandoc](https://pandoc.org/)** (v3.x recommended)
+  - macOS: `brew install pandoc`
+  - Debian/Ubuntu: `sudo apt install pandoc`
+  - Windows: `winget install JohnMacFarlane.Pandoc`
+  *(Note: Pandoc is already pre-installed inside the official Docker image).*
+
+### Python Dependencies
 - Python 3.10–3.14 (3.13 recommended, see below)
 - PyTorch (with CUDA/ROCm support for GPU acceleration)
 - marker-pdf==1.10.2
-- transformers==4.57.6
-- markdown==3.10.2
-- latex2mathml==3.81.0
+- Pillow
+- regex
 
 ### ⚠️ Python version
 
@@ -42,7 +49,12 @@ Without these headers the install fails with
 
 ## 💻 Installation
 
-1. Create and activate a virtual environment.
+1. Install system dependencies (if running natively without Docker):
+   - **macOS:** `brew install pandoc`
+   - **Debian/Ubuntu:** `sudo apt install pandoc`
+   - **Windows:** `winget install JohnMacFarlane.Pandoc`
+
+2. Create and activate a virtual environment.
 
 On Linux/Mac:
 ```bash
@@ -56,14 +68,14 @@ py -3.13 -m venv .venv
 .venv\Scripts\activate
 ```
 
-2. Install Python dependencies (this installs PyTorch as well):
+3. Install Python dependencies (this installs PyTorch as well):
 ```bash
 pip install -r requirements.txt
 ```
 
-3. GPU acceleration (optional):
+4. GPU acceleration (optional):
 
-PyTorch is installed as a dependency in step 2. On Apple Silicon that wheel
+PyTorch is installed as a dependency in step 3. On Apple Silicon that wheel
 already supports MPS, so no further action is needed. For a specific CUDA or
 ROCm build, reinstall PyTorch using the selector at
 [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/).
@@ -73,7 +85,7 @@ pip uninstall torch torchvision torchaudio
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
 ```
 
-4. Verify GPU support:
+5. Verify GPU support:
 ```python
 import torch
 print(torch.__version__)  # PyTorch version
@@ -84,7 +96,7 @@ print(torch.version.hip)  # Should print ROCm version for AMD
 
 ### 🐳 Docker
 
-A CPU-only image can be built from the included `Dockerfile`:
+A CPU-only image can be built from the included `Dockerfile` (which includes Pandoc):
 
 ```bash
 docker build -t pdf2epub .
@@ -100,8 +112,7 @@ docker run -it --rm \
   pdf2epub input.pdf
 ```
 
-`-it` is required for EPUB generation because metadata is prompted
-interactively; with `--skip-epub` it can run non-interactively.
+`-it` is optional: if an interactive TTY is attached, you can customize the title and author during EPUB compilation; in headless/background execution, sensible defaults extracted by marker-pdf are applied automatically.
 
 Tagged releases are also published to
 `ghcr.io/overcuriousity/pdf2epub` by the Docker workflow.
@@ -120,10 +131,7 @@ Convert all PDFs in a directory:
 python main.py input_directory/
 ```
 
-EPUB generation prompts interactively for metadata (title, author, language,
-and so on; press Enter to accept each default). It therefore needs a terminal —
-run it non-interactively and it will fail with `EOFError`. Use `--skip-epub` to
-produce only markdown without any prompts.
+When running in an interactive terminal, EPUB generation prompts to confirm or customize metadata (title and author; press Enter to accept defaults). In headless or non-interactive environments, default metadata extracted from the document is used automatically. Use `--skip-epub` to produce only markdown without compiling to EPUB.
 
 ### Advanced Options
 
@@ -211,7 +219,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 This project builds upon several excellent open-source libraries:
-- [marker-pdf](https://github.com/VikParuchuri/marker) for PDF processing
-- [mark2epub](https://github.com/AlexPof/mark2epub) for markdown conversion
+- [marker-pdf](https://github.com/VikParuchuri/marker) for PDF layout detection, OCR, and markdown extraction
+- [Pandoc](https://pandoc.org/) for robust, standard-compliant EPUB 3 document compilation and MathML rendering
 - [PyTorch](https://pytorch.org/) for GPU acceleration
-- [Transformers](https://huggingface.co/transformers) for advanced text processing
