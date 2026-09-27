@@ -4,17 +4,20 @@ import sys
 from pathlib import Path
 import modules.pdf2md as pdf2md
 import modules.mark2epub as mark2epub
-import torch
-                
+try:
+    import torch
+except ImportError:
+    torch = None
 
 
 def main():
-    if torch.cuda.is_available():
-        print("CUDA is available. Using GPU for processing.")
-    elif torch.backends.mps.is_available():
-        print("MPS is available. Using Apple Silicon for processing.")
-    else:
-        print("CUDA is not available. Using CPU for processing.")
+    if torch is not None:
+        if torch.cuda.is_available():
+            print("CUDA is available. Using GPU for processing.")
+        elif torch.backends.mps.is_available():
+            print("MPS is available. Using Apple Silicon for processing.")
+        else:
+            print("CUDA is not available. Using CPU for processing.")
         
     parser = argparse.ArgumentParser(
         description='Convert PDF files to EPUB format via Markdown'
@@ -53,8 +56,39 @@ def main():
         action='store_true',
         help='Skip markdown generation, use existing markdown files'
     )
+    parser.add_argument(
+        '--direction', '--dir',
+        dest='direction',
+        choices=['rtl', 'ltr', 'auto'],
+        type=str.lower,
+        default='auto',
+        help='Set text direction: rtl, ltr, or auto (default: auto)'
+    )
+    parser.add_argument(
+        '--rtl',
+        action='store_true',
+        help='Convenience flag to force RTL text direction'
+    )
+    parser.add_argument(
+        '--ltr',
+        action='store_true',
+        help='Convenience flag to force LTR text direction'
+    )
+    parser.add_argument(
+        '--lang', '--language',
+        dest='language',
+        type=str,
+        default=None,
+        help='Override document language code (e.g., he, ar, en, fr)'
+    )
     
     args = parser.parse_args()
+    
+    direction = args.direction
+    if args.rtl:
+        direction = 'rtl'
+    elif args.ltr:
+        direction = 'ltr'
     
     # Get input path
     input_path = Path(args.input_path) if args.input_path else pdf2md.get_default_input_dir()
@@ -98,7 +132,12 @@ def main():
             # Convert Markdown to EPUB unless skipped
             if not args.skip_epub:
                 print("Converting Markdown to EPUB...")
-                mark2epub.convert_to_epub(markdown_dir, output_path)
+                mark2epub.convert_to_epub(
+                    markdown_dir,
+                    output_path,
+                    direction=direction,
+                    language=args.language,
+                )
                 
         except Exception as e:
             print(f"Error processing {pdf_path.name}: {str(e)}", file=sys.stderr)

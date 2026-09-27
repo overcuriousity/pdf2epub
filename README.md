@@ -11,6 +11,7 @@ Convert PDF files to nicely structured Markdown and EPUB format with intelligent
 - 📝 Clean markdown output with preserved structure
 - 📱 EPUB generation with customizable styling
 - 🌍 Multi-language support
+- 🔄 Automatic RTL/LTR text direction and language detection with page progression support
 - 🚀 GPU acceleration support (NVIDIA & AMD)
 - 🍎 Apple Silicon support
 
@@ -135,6 +136,11 @@ Options:
   --start-page INT         Page number to start from
   --skip-epub              Skip EPUB generation, only create markdown
   --skip-md                Skip markdown generation, use existing markdown files
+  --direction, --dir {rtl,ltr,auto}
+                           Set text direction (default: auto)
+  --rtl                    Force Right-to-Left text direction
+  --ltr                    Force Left-to-Right text direction
+  --lang, --language CODE  Override document language code (e.g., he, ar, en, fr)
 ```
 
 If `input_path` is omitted, all PDFs in `./input/` are processed.
@@ -149,6 +155,16 @@ python main.py book.pdf --start-page 10 --max-pages 50
 Convert to markdown only:
 ```bash
 python main.py thesis.pdf --skip-epub
+```
+
+Convert an RTL document with automatic direction and language detection:
+```bash
+python main.py hebrew_book.pdf
+```
+
+Force RTL direction and specify language code:
+```bash
+python main.py arabic_book.pdf --rtl --lang ar
 ```
 
 ### Output Structure

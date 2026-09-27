@@ -118,6 +118,15 @@ def convert_pdf(
         md_output.write_text(full_text, encoding='utf-8')
         print(f"Markdown saved to: {md_output}")
 
+        # Detect text direction and language
+        try:
+            from modules.bidi import detect_direction_and_language
+            detected_dir, detected_lang = detect_direction_and_language(full_text)
+            metadata["direction"] = detected_dir
+            metadata["detected_language"] = detected_lang
+        except Exception as e:
+            print(f"Warning: Failed to detect direction/language: {e}")
+
         # Save metadata as JSON
         meta_output = output_dir / f"{Path(input_path).stem}_metadata.json"
         with open(meta_output, 'w', encoding='utf-8') as f:

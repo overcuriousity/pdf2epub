@@ -31,3 +31,8 @@ jobs:
       # imports). Style rules are deliberately excluded.
       - name: Lint
         run: ruff check --select E9,F .
+
+      - name: Run tests
+        run: |
+          pip install pytest markdown latex2mathml pillow regex
+          pytest
