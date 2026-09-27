@@ -4,22 +4,32 @@ from xml.dom import minidom
 import zipfile
 import sys
 import json
+import io
+import argparse
 from PIL import Image
 import regex as re
 from pathlib import Path
 from datetime import datetime, timezone
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 import latex2mathml.converter
 
+try:
+    from modules.bidi import detect_direction_and_language
+except ImportError:
+    from bidi import detect_direction_and_language
+
 def get_user_input(prompt: str, default: str = "") -> str:
     """Get user input with a default value."""
-    user_input = input(f"{prompt} [{default}]: ").strip()
-    return user_input if user_input else default
+    try:
+        user_input = input(f"{prompt} [{default}]: ").strip()
+        return user_input if user_input else default
+    except (EOFError, io.UnsupportedOperation, OSError):
+        return default
 
-def get_metadata_from_user(existing_metadata: Optional[Dict] = None) -> Dict:
+def get_metadata_from_user(existing_metadata: Optional[Dict] = None, default_lang: str = "en") -> Dict:
     """Interactively collect metadata from user with defaults from existing metadata."""
     if existing_metadata is None:
         existing_metadata = {}
@@ -32,7 +42,7 @@ def get_metadata_from_user(existing_metadata: Optional[Dict] = None) -> Dict:
         "dc:title": ("Title", metadata.get("dc:title", "Untitled Document")),
         "dc:creator": ("Author(s)", metadata.get("dc:creator", "Unknown Author")),
         "dc:identifier": ("Unique Identifier", metadata.get("dc:identifier", f"id-{datetime.now().strftime('%Y%m%d%H%M%S')}")),
-        "dc:language": ("Language (e.g., en, de, fr)", metadata.get("dc:language", "en")),
+        "dc:language": ("Language (e.g., en, de, fr)", metadata.get("dc:language", default_lang)),
         "dc:rights": ("Rights", metadata.get("dc:rights", "All rights reserved")),
         "dc:publisher": ("Publisher", metadata.get("dc:publisher", "PDF2EPUB")),
         "dc:date": ("Publication Date (YYYY-MM-DD)", metadata.get("dc:date", datetime.now().strftime("%Y-%m-%d")))
@@ -47,7 +57,8 @@ def get_metadata_from_user(existing_metadata: Optional[Dict] = None) -> Dict:
         "metadata": updated_metadata,
         "default_css": existing_metadata.get("default_css", ["style.css"]),
         "chapters": existing_metadata.get("chapters", []),
-        "cover_image": existing_metadata.get("cover_image", None)
+        "cover_image": existing_metadata.get("cover_image", None),
+        "direction": existing_metadata.get("direction", "ltr")
     }
 
 def review_markdown(markdown_path: Path) -> tuple[bool, str]:
@@ -55,7 +66,10 @@ def review_markdown(markdown_path: Path) -> tuple[bool, str]:
     content = markdown_path.read_text(encoding='utf-8')
     
     while True:
-        response = input("\nWould you like to review the markdown file before conversion? (y/n): ").lower()
+        try:
+            response = input("\nWould you like to review the markdown file before conversion? (y/n): ").lower()
+        except (EOFError, io.UnsupportedOperation, OSError):
+            return True, content
         if response in ['y', 'yes']:
             try:
                 if sys.platform == 'darwin':
@@ -170,13 +184,17 @@ def get_all_filenames(the_dir, extensions=[]):
     all_files = [x for x in all_files if x.split(".")[-1] in extensions]
     return all_files
 
-def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], description_data=None):
+def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], description_data=None, direction="ltr", lang="en"):
     doc = minidom.Document()
+
+    dir_val = (description_data.get("direction") if description_data else None) or direction
+    lang_val = (description_data.get("metadata", {}).get("dc:language") if description_data else None) or lang
 
     package = doc.createElement('package')
     package.setAttribute('xmlns',"http://www.idpf.org/2007/opf")
     package.setAttribute('version',"3.0")
-    package.setAttribute('xml:lang',"en")
+    package.setAttribute('xml:lang', lang_val)
+    package.setAttribute('dir', dir_val)
     package.setAttribute("unique-identifier","pub-id")
 
     ## Now building the metadata
@@ -184,14 +202,23 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
     metadata = doc.createElement('metadata')
     metadata.setAttribute('xmlns:dc', 'http://purl.org/dc/elements/1.1/')
 
-    for k,v in description_data["metadata"].items():
-        if len(v):
-            x = doc.createElement(k)
-            for metadata_type,id_label in [("dc:title","title"),("dc:creator","creator"),("dc:identifier","pub-id")]:
-                if k==metadata_type:
-                    x.setAttribute('id',id_label)
-            x.appendChild(doc.createTextNode(v))
-            metadata.appendChild(x)
+    has_language = False
+    if description_data and "metadata" in description_data:
+        for k, v in description_data["metadata"].items():
+            if len(v):
+                if k == "dc:language":
+                    has_language = True
+                x = doc.createElement(k)
+                for metadata_type, id_label in [("dc:title","title"),("dc:creator","creator"),("dc:identifier","pub-id")]:
+                    if k == metadata_type:
+                        x.setAttribute('id', id_label)
+                x.appendChild(doc.createTextNode(v))
+                metadata.appendChild(x)
+
+    if not has_language and lang_val:
+        x = doc.createElement("dc:language")
+        x.appendChild(doc.createTextNode(lang_val))
+        metadata.appendChild(x)
 
     # Required by EPUB 3: dcterms:modified timestamp
     modified_meta = doc.createElement('meta')
@@ -264,6 +291,7 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
 
     spine = doc.createElement('spine')
     spine.setAttribute('toc', "ncx")
+    spine.setAttribute('page-progression-direction', dir_val)
 
     x = doc.createElement('itemref')
     x.setAttribute('idref',"titlepage")
@@ -300,10 +328,10 @@ def get_container_XML():
     container_data += """</rootfiles>\n</container>"""
     return container_data
 
-def get_coverpage_XML(title, authors):
+def get_coverpage_XML(title, authors, direction: str = "ltr", lang: str = "en"):
     """Generate a simple cover page with title and optional author input."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}" dir="{direction}">
 <head>
 <title>Cover Page</title>
 <style type="text/css">
@@ -315,12 +343,14 @@ body {{
     justify-content: center;
     align-items: center;
     font-family: serif;
+    direction: {direction};
 }}
 .cover {{
     padding: 3em;
     text-align: center;
     border: 1px solid #ccc;
     max-width: 80%;
+    direction: {direction};
 }}
 h1 {{
     font-size: 2em;
@@ -344,11 +374,11 @@ p {{
 </body>
 </html>"""
 
-def get_TOC_XML(default_css_filenames, markdown_filenames):
+def get_TOC_XML(default_css_filenames, markdown_filenames, direction: str = "ltr", lang: str = "en"):
     ## Returns the XML data for the TOC.xhtml file
 
     toc_xhtml = """<?xml version="1.0" encoding="UTF-8"?>\n"""
-    toc_xhtml += """<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">\n"""
+    toc_xhtml += f"""<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}" dir="{direction}">\n"""
     toc_xhtml += """<head>\n<meta http-equiv="default-style" content="text/html; charset=utf-8"/>\n"""
     toc_xhtml += """<title>Contents</title>\n"""
 
@@ -365,11 +395,11 @@ def get_TOC_XML(default_css_filenames, markdown_filenames):
 
     return toc_xhtml
 
-def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
+def get_TOCNCX_XML(markdown_filenames, uid="", title="", lang: str = "en"):
     ## Returns the XML data for the TOC.ncx file
 
     toc_ncx = """<?xml version="1.0" encoding="UTF-8"?>\n"""
-    toc_ncx += """<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" xml:lang="en" version="2005-1">\n"""
+    toc_ncx += f"""<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" xml:lang="{lang}" version="2005-1">\n"""
     toc_ncx += """<head>\n"""
     toc_ncx += """<meta name="dtb:uid" content="{}"/>\n""".format(xml_escape(uid))
     toc_ncx += """<meta name="dtb:depth" content="1"/>\n"""
@@ -434,7 +464,7 @@ def convert_math_to_mathml(html_text: str) -> str:
 
     return masked
 
-def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], content: Optional[str] = None) -> tuple[str, list[str]]:
+def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], content: Optional[str] = None, direction: str = "ltr", lang: str = "en") -> tuple[str, list[str]]:
     """
     Convert markdown chapter to XHTML and process images.
     Returns tuple of (XHTML content, list of images referenced in chapter)
@@ -444,6 +474,8 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
         md_filename: Name of markdown file
         css_filenames: List of CSS files to include
         content: Optional pre-loaded markdown content. If None, content is read from file
+        direction: Text direction ('ltr' or 'rtl')
+        lang: Language code ('en', 'he', etc.)
     """
     work_dir_path = Path(work_dir)
     
@@ -468,7 +500,7 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
 
     # Generate XHTML wrapper
     xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xmlns:m="http://www.w3.org/1998/Math/MathML" lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xmlns:m="http://www.w3.org/1998/Math/MathML" xml:lang="{lang}" lang="{lang}" dir="{direction}">
 <head>
     <meta http-equiv="default-style" content="text/html; charset=utf-8"/>
     {''.join(f'<link rel="stylesheet" href="css/{css}" type="text/css" media="all"/>' for css in css_filenames)}
@@ -482,60 +514,86 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
 
 
 
-def convert_to_epub(markdown_dir: Path, output_path: Path) -> None:
-    """
-    Convert markdown files and images to EPUB format.
-    """
-    if not markdown_dir.exists():
-        raise FileNotFoundError(f"Markdown directory not found: {markdown_dir}")
-        
-    if not list(markdown_dir.glob('*.md')):
-        raise ValueError(f"No markdown files found in: {markdown_dir}")
-    
-    # Generate EPUB file
-    epub_path = markdown_dir / f"{markdown_dir.name}.epub"
-    main([str(markdown_dir), str(epub_path)])
+def convert_markdown_to_epub(
+    work_dir: Union[str, Path],
+    output_path: Union[str, Path],
+    direction: Optional[str] = None,
+    language: Optional[str] = None,
+) -> None:
+    work_dir = Path(work_dir)
+    output_path = Path(output_path)
 
-def main(args):
-    if len(args) < 2:
-        print("\nUsage:\n    python md2epub.py <markdown_directory> <output_file.epub>")
-        exit(1)
-
-    work_dir = args[0]
-    output_path = args[1]
-
-    images_dir = os.path.join(work_dir, 'images/')
-    css_dir = os.path.join(work_dir, 'css/')
+    images_dir = work_dir / 'images'
+    css_dir = work_dir / 'css'
 
     try:
         # Reading/Creating the JSON file containing the description of the eBook
-        description_path = os.path.join(work_dir, "description.json")
+        description_path = work_dir / "description.json"
         existing_metadata = {}
         
-        if os.path.exists(description_path):
+        if description_path.exists():
             with open(description_path, 'r', encoding='utf-8') as f:
                 existing_metadata = json.load(f)
-        
-        # Get metadata from user
-        json_data = get_metadata_from_user(existing_metadata)
-        
+
+        # Collect all markdown files and their text for direction/language detection
+        markdown_files = [f for f in os.listdir(work_dir) if f.endswith('.md')]
+        all_text_list = []
+        for md_file in sorted(markdown_files):
+            try:
+                all_text_list.append((work_dir / md_file).read_text(encoding='utf-8'))
+            except Exception:
+                pass
+        combined_text = "\n".join(all_text_list)
+
+        detected_dir, detected_lang = detect_direction_and_language(combined_text)
+
+        # Resolve direction: CLI parameter overrides description.json, which overrides auto-detection
+        norm_dir = direction.strip().lower() if direction and direction.strip().lower() != "auto" else None
+        if norm_dir in ("rtl", "ltr"):
+            final_direction = norm_dir
+        elif existing_metadata.get("direction"):
+            final_direction = existing_metadata["direction"]
+        else:
+            final_direction = detected_dir
+
+        # Resolve language: CLI parameter overrides description.json, which overrides auto-detection
+        norm_lang = language.strip().lower() if language and language.strip() else None
+        if norm_lang:
+            default_language = norm_lang
+        elif existing_metadata.get("metadata", {}).get("dc:language"):
+            default_language = existing_metadata["metadata"]["dc:language"]
+        else:
+            default_language = detected_lang
+
+        print(f"Text direction: {final_direction.upper()} (detected: {detected_dir.upper()})")
+        print(f"Language: {default_language} (detected: {detected_lang})")
+
+        # Get metadata from user (using detected/resolved language as default)
+        json_data = get_metadata_from_user(existing_metadata, default_lang=default_language)
+
+        if norm_lang:
+            json_data["metadata"]["dc:language"] = norm_lang
+
+        json_data["direction"] = final_direction
+
         # Find all markdown files if not already in metadata
         if not json_data["chapters"]:
-            markdown_files = [f for f in os.listdir(work_dir) if f.endswith('.md')]
             for md_file in sorted(markdown_files):
                 json_data["chapters"].append({
                     "markdown": md_file,
                     "css": ""
                 })
-        
+
         # Save the updated description.json
         with open(description_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, indent=2)
-        
+
+        final_lang = json_data["metadata"].get("dc:language", default_language)
+
         # Review markdown files and store updated content
         chapter_contents = {}
         for chapter in json_data["chapters"]:
-            md_path = Path(work_dir) / chapter["markdown"]
+            md_path = work_dir / chapter["markdown"]
             should_continue, content = review_markdown(md_path)
             if not should_continue:
                 print("\nConversion aborted by user.")
@@ -555,11 +613,10 @@ def main(args):
             if len(chapter["css"]) and (chapter["css"] not in all_css_filenames):
                 all_css_filenames.append(chapter["css"])
         
-        all_image_filenames = get_all_filenames(images_dir, extensions=["gif", "jpg", "jpeg", "png"])
+        all_image_filenames = get_all_filenames(str(images_dir), extensions=["gif", "jpg", "jpeg", "png"])
 
         # First process all chapters and images
-        images_dir = Path(work_dir) / 'images'
-        epub_images_dir = Path(work_dir) / 'epub_images'
+        epub_images_dir = work_dir / 'epub_images'
         processed_images = {}  # Store processed image data
         all_referenced_images = set()
         chapter_data = {}  # Store processed chapter data
@@ -573,10 +630,12 @@ def main(args):
                 
             # Process chapter content
             chapter_xhtml, chapter_images = get_chapter_XML(
-                work_dir, 
+                str(work_dir), 
                 chapter["markdown"], 
                 css_files,
-                content=chapter_contents[chapter["markdown"]]
+                content=chapter_contents[chapter["markdown"]],
+                direction=final_direction,
+                lang=final_lang,
             )
             chapter_data[chapter["markdown"]] = chapter_xhtml
             all_referenced_images.update(chapter_images)
@@ -620,13 +679,15 @@ def main(args):
                     md_filenames=all_md_filenames,
                     image_filenames=all_image_filenames,
                     css_filenames=all_css_filenames,
-                    description_data=json_data
+                    description_data=json_data,
+                    direction=final_direction,
+                    lang=final_lang,
                 ), 
                 zipfile.ZIP_DEFLATED
             )
 
             # Write cover page
-            coverpage_data = get_coverpage_XML(title, authors)
+            coverpage_data = get_coverpage_XML(title, authors, direction=final_direction, lang=final_lang)
             epub.writestr("OPS/titlepage.xhtml", coverpage_data.encode('utf-8'), zipfile.ZIP_DEFLATED)
 
             # Write processed chapters
@@ -648,7 +709,7 @@ def main(args):
             # Write TOC files
             print("Writing table of contents...")
             epub.writestr("OPS/TOC.xhtml", 
-                get_TOC_XML(json_data["default_css"], all_md_filenames),
+                get_TOC_XML(json_data["default_css"], all_md_filenames, direction=final_direction, lang=final_lang),
                 zipfile.ZIP_DEFLATED
             )
             
@@ -656,17 +717,18 @@ def main(args):
                 get_TOCNCX_XML(
                     all_md_filenames,
                     uid=json_data["metadata"].get("dc:identifier", ""),
-                    title=json_data["metadata"].get("dc:title", "")
+                    title=json_data["metadata"].get("dc:title", ""),
+                    lang=final_lang,
                 ),
                 zipfile.ZIP_DEFLATED
             )
 
             # Copy remaining images that weren't referenced in markdown
             remaining_images = set(all_image_filenames) - set(processed_images.keys())
-            if remaining_images and os.path.exists(images_dir):
+            if remaining_images and images_dir.exists():
                 print(f"Writing {len(remaining_images)} additional images...")
                 for image in remaining_images:
-                    with open(os.path.join(images_dir, image), "rb") as f:
+                    with open(images_dir / image, "rb") as f:
                         epub.writestr(f"OPS/images/{image}", f.read(), zipfile.ZIP_DEFLATED)
 
             # Copy CSS files; write a default style.css for any that are missing
@@ -674,11 +736,12 @@ def main(args):
 h1, h2, h3, h4, h5, h6 { font-family: sans-serif; }
 img { max-width: 100%; height: auto; }
 pre, code { font-family: monospace; font-size: 0.9em; }
+[dir="rtl"], body[dir="rtl"], html[dir="rtl"] { direction: rtl; text-align: right; }
 """
             print(f"Writing {len(all_css_filenames)} CSS files...")
             for css in all_css_filenames:
-                css_path = os.path.join(css_dir, css)
-                if os.path.exists(css_path):
+                css_path = css_dir / css
+                if css_path.exists():
                     with open(css_path, "rb") as f:
                         epub.writestr(f"OPS/css/{css}", f.read(), zipfile.ZIP_DEFLATED)
                 else:
@@ -691,6 +754,80 @@ pre, code { font-family: monospace; font-size: 0.9em; }
         print(f"Error processing {work_dir}:")
         print(traceback.format_exc())
         raise
+
+def convert_to_epub(
+    markdown_dir: Path,
+    output_path: Path,
+    direction: Optional[str] = None,
+    language: Optional[str] = None,
+) -> None:
+    """
+    Convert markdown files and images to EPUB format.
+    """
+    if not markdown_dir.exists():
+        raise FileNotFoundError(f"Markdown directory not found: {markdown_dir}")
+        
+    if not list(markdown_dir.glob('*.md')):
+        raise ValueError(f"No markdown files found in: {markdown_dir}")
+    
+    # Generate EPUB file
+    epub_path = markdown_dir / f"{markdown_dir.name}.epub"
+    convert_markdown_to_epub(
+        work_dir=markdown_dir,
+        output_path=epub_path,
+        direction=direction,
+        language=language,
+    )
+
+def main(args=None):
+    if args is None:
+        args = sys.argv[1:]
+
+    parser = argparse.ArgumentParser(
+        description="Convert Markdown files to EPUB format"
+    )
+    parser.add_argument("markdown_directory", help="Path to markdown directory")
+    parser.add_argument("output_file", help="Path to output EPUB file")
+    parser.add_argument(
+        "--direction", "--dir",
+        dest="direction",
+        choices=["rtl", "ltr", "auto"],
+        type=str.lower,
+        default="auto",
+        help="Set text direction: rtl, ltr, or auto (default: auto)",
+    )
+    parser.add_argument(
+        "--rtl",
+        action="store_true",
+        help="Convenience flag to force RTL text direction",
+    )
+    parser.add_argument(
+        "--ltr",
+        action="store_true",
+        help="Convenience flag to force LTR text direction",
+    )
+    parser.add_argument(
+        "--lang", "--language",
+        dest="language",
+        type=str,
+        default=None,
+        help="Override document language code (e.g., he, ar, en, fr)",
+    )
+
+    parsed = parser.parse_args(args)
+
+    direction = parsed.direction
+    if parsed.rtl:
+        direction = "rtl"
+    elif parsed.ltr:
+        direction = "ltr"
+
+    convert_markdown_to_epub(
+        work_dir=parsed.markdown_directory,
+        output_path=parsed.output_file,
+        direction=direction,
+        language=parsed.language,
+    )
 
 if __name__ == "__main__":
     main(sys.argv[1:])
