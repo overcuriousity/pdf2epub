@@ -58,8 +58,20 @@ py -3.13 -m venv .venv
 
 2. Install Python dependencies (this installs PyTorch as well):
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+Keep the virtual environment active when running `python main.py`. If you see
+`ModuleNotFoundError: No module named 'latex2mathml'`, your Python may be using
+another environment. On Linux/Mac, run with the project interpreter directly:
+
+```bash
+.venv/bin/python main.py ~/scan-pages/Book1.pdf
+```
+
+If that interpreter also reports a missing dependency, install the full
+requirements into `.venv`. For environments created with uv, use
+`uv pip install --python .venv/bin/python -r requirements.txt`.
 
 3. GPU acceleration (optional):
 
@@ -132,7 +144,8 @@ python main.py [input_path] [output_path] [options]
 
 Options:
   --max-pages INT          Maximum number of pages to process
-  --start-page INT         Page number to start from
+  --start-page INT         Zero-based page index to start from
+  --chunk-pages INT        Pages processed at once (default: 10; 0 disables chunking)
   --skip-epub              Skip EPUB generation, only create markdown
   --skip-md                Skip markdown generation, use existing markdown files
 ```
@@ -149,6 +162,26 @@ python main.py book.pdf --start-page 10 --max-pages 50
 Convert to markdown only:
 ```bash
 python main.py thesis.pdf --skip-epub
+```
+
+### GPU memory usage
+
+PDFs are processed in 10-page chunks by default, then joined into one Markdown
+file and one EPUB. This bounds the page-image memory used by Marker; users do
+not need to split or reassemble the PDF themselves. On an 8 GB GPU, the default
+also sets all of Marker's layout, detection, OCR, recognition, table, and
+equation batch sizes to 1.
+
+If a particularly image-heavy PDF still runs out of memory, use a smaller
+chunk (for example `--chunk-pages 4`). `PDF2EPUB_GPU_BATCH_SIZE` can raise the
+model batch sizes on GPUs with more memory. `DETECTOR_BATCH_SIZE` alone does not
+control Marker's internal detection batch in the pinned Marker version.
+
+PyTorch's allocator variable is named `PYTORCH_CUDA_ALLOC_CONF` (including
+`CUDA`), for example:
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python main.py book.pdf
 ```
 
 ### Output Structure
