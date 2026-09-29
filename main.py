@@ -41,7 +41,16 @@ def main():
         '--start-page',
         type=int,
         default=None,
-        help='Page number to start from'
+        help='Zero-based page index to start from'
+    )
+    parser.add_argument(
+        '--chunk-pages',
+        type=int,
+        default=pdf2md.DEFAULT_CHUNK_PAGES,
+        help=(
+            'Pages processed at once (default: 10; lower this if GPU memory is '
+            'still exhausted, or use 0 to disable chunking)'
+        )
     )
     parser.add_argument(
         '--skip-epub',
@@ -93,6 +102,7 @@ def main():
                     markdown_dir,
                     args.max_pages,
                     args.start_page,
+                    args.chunk_pages,
                 )
             
             # Convert Markdown to EPUB unless skipped
