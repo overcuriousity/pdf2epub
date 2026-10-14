@@ -13,34 +13,52 @@ from typing import Dict, Optional
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 import latex2mathml.converter
+from modules import metadata as metadata_lib
 
 def get_user_input(prompt: str, default: str = "") -> str:
     """Get user input with a default value."""
     user_input = input(f"{prompt} [{default}]: ").strip()
     return user_input if user_input else default
 
-def get_metadata_from_user(existing_metadata: Optional[Dict] = None) -> Dict:
+def get_metadata_from_user(existing_metadata: Optional[Dict] = None,
+                           fallback_title: Optional[str] = None,
+                           filename: Optional[str] = None) -> Dict:
     """Interactively collect metadata from user with defaults from existing metadata."""
     if existing_metadata is None:
         existing_metadata = {}
-    
-    metadata = existing_metadata.get("metadata", {})
-    
+
+    defaults = metadata_lib.prompt_defaults(existing_metadata.get("metadata"), fallback_title)
+
+    # Author may have several names from a previous run; show them joined.
     print("\nPlease provide the following metadata for your EPUB (press Enter to use default value):")
-    
+
     fields = {
-        "dc:title": ("Title", metadata.get("dc:title", "Untitled Document")),
-        "dc:creator": ("Author(s)", metadata.get("dc:creator", "Unknown Author")),
-        "dc:identifier": ("Unique Identifier", metadata.get("dc:identifier", f"id-{datetime.now().strftime('%Y%m%d%H%M%S')}")),
-        "dc:language": ("Language (e.g., en, de, fr)", metadata.get("dc:language", "en")),
-        "dc:rights": ("Rights", metadata.get("dc:rights", "All rights reserved")),
-        "dc:publisher": ("Publisher", metadata.get("dc:publisher", "PDF2EPUB")),
-        "dc:date": ("Publication Date (YYYY-MM-DD)", metadata.get("dc:date", datetime.now().strftime("%Y-%m-%d")))
+        "dc:title": ("Title", defaults["dc:title"]),
+        "dc:creator": ("Author(s)", defaults["dc:creator"]),
+        "dc:identifier": ("Unique Identifier", defaults["dc:identifier"]),
+        "dc:language": ("Language (e.g., en, de, fr)", defaults["dc:language"]),
+        "dc:rights": ("Rights", defaults["dc:rights"]),
+        "dc:publisher": ("Publisher", defaults["dc:publisher"]),
+        "dc:date": ("Publication Date (YYYY-MM-DD)", defaults["dc:date"])
     }
     
     updated_metadata = {}
     for key, (prompt, default) in fields.items():
+        if key == "dc:identifier" and not default:
+            # prompt_defaults leaves this empty; derive it from the title the
+            # user just settled on so the identifier matches the real title.
+            default = metadata_lib.default_identifier(
+                updated_metadata.get("dc:title", "") or fallback_title or "",
+                filename,
+            )
+
         value = get_user_input(prompt, default)
+        if key == "dc:date" and value:
+            try:
+                value = metadata_lib.normalise_date(value)
+            except metadata_lib.MetadataError as exc:
+                print(f"  {exc} Using {defaults[key]}.")
+                value = defaults[key]
         updated_metadata[key] = value
         
     return {
@@ -184,13 +202,25 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
     metadata = doc.createElement('metadata')
     metadata.setAttribute('xmlns:dc', 'http://purl.org/dc/elements/1.1/')
 
+    # Only the first element of each kind carries the canonical id; EPUB 3
+    # requires XML ids to be unique, and `dc:creator` repeats once per author.
+    keyed_ids = {"dc:title": "title", "dc:creator": "creator", "dc:identifier": "pub-id"}
+    used_ids = set()
+
     for k,v in description_data["metadata"].items():
-        if len(v):
+        # Several values (e.g. multiple authors) become repeated elements.
+        values = v if isinstance(v, list) else [v]
+        for single in values:
+            single = single if isinstance(single, str) else str(single)
+            if not len(single):
+                continue
             x = doc.createElement(k)
-            for metadata_type,id_label in [("dc:title","title"),("dc:creator","creator"),("dc:identifier","pub-id")]:
-                if k==metadata_type:
-                    x.setAttribute('id',id_label)
-            x.appendChild(doc.createTextNode(v))
+            if k in keyed_ids:
+                id_label = keyed_ids[k]
+                # Later repeats get a distinct id so the document stays valid.
+                x.setAttribute('id', id_label if id_label not in used_ids else f"{id_label}-{len(used_ids)}")
+                used_ids.add(x.getAttribute('id'))
+            x.appendChild(doc.createTextNode(single))
             metadata.appendChild(x)
 
     # Required by EPUB 3: dcterms:modified timestamp
@@ -300,6 +330,14 @@ def get_container_XML():
     container_data += """</rootfiles>\n</container>"""
     return container_data
 
+def flatten_text(value) -> str:
+    """Return a plain string for a metadata value that may be a list."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value if item)
+    return str(value)
+
 def get_coverpage_XML(title, authors):
     """Generate a simple cover page with title and optional author input."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
@@ -338,8 +376,8 @@ p {{
 </head>
 <body>
     <div class="cover">
-        <h1>{xml_escape(title)}</h1>
-        <p>{xml_escape(authors) if authors else ''}</p>
+        <h1>{xml_escape(flatten_text(title))}</h1>
+        <p>{xml_escape(flatten_text(authors)) if authors else ''}</p>
     </div>
 </body>
 </html>"""
@@ -482,9 +520,16 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
 
 
 
-def convert_to_epub(markdown_dir: Path, output_path: Path) -> None:
+def convert_to_epub(markdown_dir: Path, output_path: Path, metadata: Optional[Dict] = None) -> None:
     """
     Convert markdown files and images to EPUB format.
+
+    Args:
+        markdown_dir: Directory holding the markdown files and images.
+        output_path: Directory the EPUB is written to.
+        metadata: Metadata to apply without prompting. When given, no
+            interactive prompts are shown and the conversion can run
+            unattended; see :func:`modules.metadata.build_metadata`.
     """
     if not markdown_dir.exists():
         raise FileNotFoundError(f"Markdown directory not found: {markdown_dir}")
@@ -494,9 +539,9 @@ def convert_to_epub(markdown_dir: Path, output_path: Path) -> None:
     
     # Generate EPUB file
     epub_path = markdown_dir / f"{markdown_dir.name}.epub"
-    main([str(markdown_dir), str(epub_path)])
+    main([str(markdown_dir), str(epub_path)], metadata=metadata)
 
-def main(args):
+def main(args, metadata: Optional[Dict] = None):
     if len(args) < 2:
         print("\nUsage:\n    python md2epub.py <markdown_directory> <output_file.epub>")
         exit(1)
@@ -516,8 +561,25 @@ def main(args):
             with open(description_path, 'r', encoding='utf-8') as f:
                 existing_metadata = json.load(f)
         
-        # Get metadata from user
-        json_data = get_metadata_from_user(existing_metadata)
+        # Get metadata, either supplied up front or asked for interactively
+        if metadata is not None:
+            json_data = {
+                "metadata": metadata_lib.resolve_metadata(
+                    metadata,
+                    existing=existing_metadata.get("metadata"),
+                    fallback_title=Path(work_dir).name,
+                    filename=work_dir,
+                ),
+                "default_css": existing_metadata.get("default_css", ["style.css"]),
+                "chapters": existing_metadata.get("chapters", []),
+                "cover_image": existing_metadata.get("cover_image", None)
+            }
+        else:
+            json_data = get_metadata_from_user(
+                existing_metadata,
+                fallback_title=Path(work_dir).name,
+                filename=work_dir,
+            )
         
         # Find all markdown files if not already in metadata
         if not json_data["chapters"]:
@@ -536,6 +598,11 @@ def main(args):
         chapter_contents = {}
         for chapter in json_data["chapters"]:
             md_path = Path(work_dir) / chapter["markdown"]
+            if metadata is not None:
+                # Non-interactive run: use the file as converted
+                chapter_contents[chapter["markdown"]] = md_path.read_text(encoding='utf-8')
+                continue
+
             should_continue, content = review_markdown(md_path)
             if not should_continue:
                 print("\nConversion aborted by user.")
@@ -545,6 +612,8 @@ def main(args):
         # Get title and author
         title = json_data["metadata"].get("dc:title", "Untitled Document")
         authors = json_data["metadata"].get("dc:creator", None)
+        if metadata is not None:
+            print(f"Using metadata: title={flatten_text(title)!r} author={flatten_text(authors)!r}")
 
         # Compile list of files
         all_md_filenames = []

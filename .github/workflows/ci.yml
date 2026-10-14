@@ -31,3 +31,27 @@ jobs:
       # imports). Style rules are deliberately excluded.
       - name: Lint
         run: ruff check --select E9,F .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # These tests avoid the heavy ML stack: modules/metadata.py has no
+      # third-party imports, and main.py's torch import is stubbed in
+      # tests/test_cli.py. Pillow, markdown, regex and latex2mathml are still
+      # imported transitively by main.py and are small pure-Python wheels.
+      - name: Install test dependencies
+        run: pip install pytest pillow markdown regex latex2mathml
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
