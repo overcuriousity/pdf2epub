@@ -55,7 +55,10 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    if args.skip_md and args.skip_epub:
+        parser.error("--skip-md and --skip-epub cannot be used together: nothing would be done.")
+
     # Get input path
     input_path = Path(args.input_path) if args.input_path else pdf2md.get_default_input_dir()
     
