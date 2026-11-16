@@ -1,6 +1,7 @@
 import markdown
 import os
 from xml.dom import minidom
+from xml.etree import ElementTree
 import zipfile
 import sys
 import json
@@ -13,6 +14,7 @@ from typing import Dict, Optional
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 import latex2mathml.converter
+from bs4 import BeautifulSoup
 
 def get_user_input(prompt: str, default: str = "") -> str:
     """Get user input with a default value."""
@@ -403,9 +405,15 @@ def convert_math_to_mathml(html_text: str) -> str:
 
     masked = re.sub(r'<pre[\s\S]*?</pre>|<code[\s\S]*?</code>', mask, html_text, flags=re.DOTALL)
 
+    # Hide \$ (literal dollar) so it can't delimit math
+    ESCAPED_DOLLAR = "\x00ESCDOLLAR\x00"
+    masked = masked.replace('\\$', ESCAPED_DOLLAR)
+
     def try_convert(latex):
         try:
-            return latex2mathml.converter.convert(latex)
+            mathml = latex2mathml.converter.convert(latex.replace(ESCAPED_DOLLAR, '\\$'))
+            ElementTree.fromstring(mathml)  # reject malformed output
+            return mathml
         except Exception:
             return None
 
@@ -429,6 +437,7 @@ def convert_math_to_mathml(html_text: str) -> str:
     masked = re.sub(r'\$\$(.*?)\$\$', replace_display_inline, masked, flags=re.DOTALL)
     masked = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', replace_inline, masked, flags=re.DOTALL)
 
+    masked = masked.replace(ESCAPED_DOLLAR, '$')
     for key, original in placeholders.items():
         masked = masked.replace(key, original)
 
@@ -462,6 +471,9 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
         extensions=["codehilite", "tables", "fenced_code", "footnotes"],
         extension_configs={"codehilite": {"guess_lang": False}}
     )
+
+    # Make raw HTML from the markdown (e.g. <br>) well-formed XHTML
+    html_text = BeautifulSoup(html_text, "html.parser").decode(formatter="minimal")
 
     # Convert LaTeX math to MathML for EPUB readers
     html_text = convert_math_to_mathml(html_text)
