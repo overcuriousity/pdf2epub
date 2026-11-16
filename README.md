@@ -139,6 +139,19 @@ Options:
 
 If `input_path` is omitted, all PDFs in `./input/` are processed.
 
+EPUB generation repairs common extracted Markdown list markers (`- 1.`,
+`- •`), two-space nested bullets, bare `<www.example.com>` links, and line
+break tags. Escaped currency symbols stay as text instead of becoming math.
+These automatic repairs leave the Markdown source unchanged; ambiguous page-break
+fragments still need manual editing.
+
+The opening contents page and reader navigation link to heading anchors. To
+select the book's main chapters and sections, add a `toc_titles` array of heading
+titles to `description.json`; matching ignores case. Without it, navigation
+includes all first-level headings. Original tables immediately following a
+`Contents`, `Brief Contents`, or `SPIS TREŚCI` heading also get clickable titles
+and page numbers wherever an entry matches a heading.
+
 ### Examples
 
 Process a specific range of pages:

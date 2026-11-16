@@ -13,6 +13,7 @@ from typing import Dict, Optional
 from urllib.parse import quote
 from xml.sax.saxutils import escape as xml_escape
 import latex2mathml.converter
+from xml.etree import ElementTree as ET
 
 def get_user_input(prompt: str, default: str = "") -> str:
     """Get user input with a default value."""
@@ -47,7 +48,8 @@ def get_metadata_from_user(existing_metadata: Optional[Dict] = None) -> Dict:
         "metadata": updated_metadata,
         "default_css": existing_metadata.get("default_css", ["style.css"]),
         "chapters": existing_metadata.get("chapters", []),
-        "cover_image": existing_metadata.get("cover_image", None)
+        "cover_image": existing_metadata.get("cover_image", None),
+        "toc_titles": existing_metadata.get("toc_titles", [])
     }
 
 def review_markdown(markdown_path: Path) -> tuple[bool, str]:
@@ -269,6 +271,10 @@ def get_packageOPF_XML(md_filenames=[], image_filenames=[], css_filenames=[], de
     x.setAttribute('idref',"titlepage")
     x.setAttribute('linear',"yes")
     spine.appendChild(x)
+    x = doc.createElement('itemref')
+    x.setAttribute('idref', 'toc')
+    x.setAttribute('linear', 'yes')
+    spine.appendChild(x)
     for i,_ in enumerate(md_filenames):
         x = doc.createElement('itemref')
         x.setAttribute('idref',"s{:05d}".format(i))
@@ -300,10 +306,10 @@ def get_container_XML():
     container_data += """</rootfiles>\n</container>"""
     return container_data
 
-def get_coverpage_XML(title, authors):
+def get_coverpage_XML(title, authors, language="en"):
     """Generate a simple cover page with title and optional author input."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{xml_escape(language, {'"': '&quot;'})}">
 <head>
 <title>Cover Page</title>
 <style type="text/css">
@@ -344,7 +350,35 @@ p {{
 </body>
 </html>"""
 
-def get_TOC_XML(default_css_filenames, markdown_filenames):
+def get_navigation_entries(markdown_filenames, chapter_data, titles=None):
+    """Link to heading anchors, optionally selecting the book's chapter titles."""
+    entries = []
+    selected = {title.casefold(): title for title in (titles or [])}
+    found = set()
+    for i, filename in enumerate(markdown_filenames):
+        href = quote(f"s{i:05d}-{filename.split('.')[0]}.xhtml")
+        root = ET.fromstring(chapter_data[filename])
+        for heading in root.iter():
+            if heading.tag not in {
+                '{http://www.w3.org/1999/xhtml}h' + str(level)
+                for level in (range(1, 7) if selected else (1,))
+            }:
+                continue
+            label = ' '.join(''.join(heading.itertext()).split())
+            key = label.casefold()
+            if selected and (key not in selected or key in found):
+                continue
+            anchor = heading.get('id')
+            if anchor:
+                entries.append((href + '#' + quote(anchor), selected.get(key, label)))
+                found.add(key)
+    if selected.keys() - found:
+        raise ValueError('TOC headings not found: ' + ', '.join(selected[k] for k in selected.keys() - found))
+    return entries or [(quote(f"s{i:05d}-{f.split('.')[0]}.xhtml"), Path(f).stem)
+                       for i, f in enumerate(markdown_filenames)]
+
+
+def get_TOC_XML(default_css_filenames, markdown_filenames, entries=None, language="en"):
     ## Returns the XML data for the TOC.xhtml file
 
     toc_xhtml = """<?xml version="1.0" encoding="UTF-8"?>\n"""
@@ -357,15 +391,16 @@ def get_TOC_XML(default_css_filenames, markdown_filenames):
 
     toc_xhtml += """</head>\n<body>\n"""
     toc_xhtml += """<nav epub:type="toc" role="doc-toc" id="toc">\n<h2>Contents</h2>\n<ol epub:type="list">"""
-    for i,md_filename in enumerate(markdown_filenames):
-        stem = md_filename.split(".")[0]
-        href = quote("s{:05d}-{}.xhtml".format(i, stem))
-        toc_xhtml += """<li><a href="{}">{}</a></li>""".format(href, xml_escape(stem))
+    if entries is None:
+        entries = [(quote(f"s{i:05d}-{Path(f).stem}.xhtml"), Path(f).stem)
+                   for i, f in enumerate(markdown_filenames)]
+    for href, label in entries:
+        toc_xhtml += '<li><a href="{}">{}</a></li>'.format(xml_escape(href), xml_escape(label))
     toc_xhtml += """</ol>\n</nav>\n</body>\n</html>"""
 
-    return toc_xhtml
+    return toc_xhtml.replace('lang="en"', 'lang="{}"'.format(xml_escape(language, {'"': '&quot;'})), 1)
 
-def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
+def get_TOCNCX_XML(markdown_filenames, uid="", title="", entries=None, language="en"):
     ## Returns the XML data for the TOC.ncx file
 
     toc_ncx = """<?xml version="1.0" encoding="UTF-8"?>\n"""
@@ -378,16 +413,17 @@ def get_TOCNCX_XML(markdown_filenames, uid="", title=""):
     toc_ncx += """</head>\n"""
     toc_ncx += """<docTitle><text>{}</text></docTitle>\n""".format(xml_escape(title))
     toc_ncx += """<navMap>\n"""
-    for i,md_filename in enumerate(markdown_filenames):
-        stem = md_filename.split(".")[0]
-        src = quote("s{:05d}-{}.xhtml".format(i, stem))
+    if entries is None:
+        entries = [(quote(f"s{i:05d}-{Path(f).stem}.xhtml"), Path(f).stem)
+                   for i, f in enumerate(markdown_filenames)]
+    for i, (src, label) in enumerate(entries):
         toc_ncx += """<navPoint id="navpoint-{}" playOrder="{}">\n""".format(i, i + 1)
-        toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(xml_escape(stem))
+        toc_ncx += """<navLabel>\n<text>{}</text>\n</navLabel>""".format(xml_escape(label))
         toc_ncx += """<content src="{}"/>""".format(src)
         toc_ncx += """ </navPoint>"""
     toc_ncx += """</navMap>\n</ncx>"""
 
-    return toc_ncx
+    return toc_ncx.replace('xml:lang="en"', 'xml:lang="{}"'.format(xml_escape(language, {'"': '&quot;'})), 1)
 
 def convert_math_to_mathml(html_text: str) -> str:
     """Replace LaTeX math expressions in HTML with MathML, skipping code blocks."""
@@ -402,10 +438,15 @@ def convert_math_to_mathml(html_text: str) -> str:
         return key
 
     masked = re.sub(r'<pre[\s\S]*?</pre>|<code[\s\S]*?</code>', mask, html_text, flags=re.DOTALL)
+    # Currency is escaped by PDF extractors; it must not open a math span.
+    currency_token = 'PDF2EPUBESCAPEDDOLLAR'
+    while currency_token in masked:
+        currency_token += 'X'
+    masked = masked.replace(r'\$', currency_token)
 
     def try_convert(latex):
         try:
-            return latex2mathml.converter.convert(latex)
+            return latex2mathml.converter.convert(latex.replace(currency_token, r'\dollar '))
         except Exception:
             return None
 
@@ -429,12 +470,99 @@ def convert_math_to_mathml(html_text: str) -> str:
     masked = re.sub(r'\$\$(.*?)\$\$', replace_display_inline, masked, flags=re.DOTALL)
     masked = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', replace_inline, masked, flags=re.DOTALL)
 
+    masked = masked.replace(currency_token, '$')
     for key, original in placeholders.items():
         masked = masked.replace(key, original)
 
     return masked
 
-def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], content: Optional[str] = None) -> tuple[str, list[str]]:
+
+def normalize_markdown_for_epub(content: str) -> str:
+    """Repair unambiguous PDF extraction artifacts without changing the source file."""
+    lines = []
+    fenced = None
+    for line in content.splitlines():
+        fence = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if fence:
+            marker = fence[1][0]
+            if fenced is None:
+                fenced = marker
+            elif fenced == marker:
+                fenced = None
+            lines.append(line)
+            continue
+        if fenced is not None or line.startswith('    ') or line.startswith('\t'):
+            lines.append(line)
+            continue
+        # A bullet followed by a number creates a nested <ol> restarting at 1.
+        line = re.sub(r'^(\s*)[-*+]\s+(\d{1,2}\.\s+)', r'\1\2', line)
+        line = re.sub(r'^(\s*)[-*+]\s*[•●]\s*', r'\1- ', line)
+        line = re.sub(r'^(\s*)[•●○]\s*', r'\1- ', line)
+        if line.strip() == '-':
+            continue
+        # Extractors use two spaces for sublists; Python Markdown requires four.
+        line = re.sub(r'^  (?=\S)', '    ', line) if re.match(r'^  (?:[-*+] |\d+\. )', line) else line
+        line = re.sub(r'<(www\.[^<>\s]+)>', lambda m: f'[{m[1]}](https://{m[1]})', line)
+        line = re.sub(r'<br\s*>', '<br />', line, flags=re.I)
+        # A loose child list otherwise consumes the next dedented parent item
+        # as lazy continuation text in Python Markdown.
+        if (re.match(r'^(?:\d+\. |[-*+] )', line) and lines
+                and re.match(r'^ {4,}(?:[-*+] |\d+\. )', lines[-1])):
+            lines.append('')
+        lines.append(line)
+    return '\n'.join(lines) + ('\n' if content.endswith('\n') else '')
+
+
+def link_printed_contents(xhtml: str) -> str:
+    """Make extracted contents tables link to real headings in this chapter."""
+    def label(fragment):
+        # Read text through XML so entities and inline emphasis compare correctly.
+        fragment = re.sub(r'<br\s*/?>', ' ', fragment)
+        return ' '.join(''.join(ET.fromstring('<label>' + fragment + '</label>').itertext()).split())
+
+    def key(text):
+        text = re.sub(r'^(?:(?:chapter|rozdział)\s*)?\d+[.:]?\s*', '', text, flags=re.I)
+        return re.sub(r'[^\w]', '', text.casefold())
+
+    headings = list(re.finditer(r'<h([1-6])\b([^>]*)>(.*?)</h\1>', xhtml, re.S))
+    targets = {}
+    for heading in headings:
+        anchor = re.search(r'\bid="([^"]+)"', heading[2])
+        heading_key = key(label(heading[3]))
+        if anchor and heading_key:
+            targets.setdefault(heading_key, anchor[1])
+
+    def link_table(match):
+        def link_row(row):
+            destination = None
+
+            def link_cell(cell):
+                nonlocal destination
+                text = label(cell[3])
+                anchor = targets.get(key(text))
+                if anchor:
+                    destination = anchor
+                elif not re.fullmatch(r'\d+', text):
+                    destination = None
+                if destination and text and '<a ' not in cell[3]:
+                    return f'<{cell[1]}{cell[2]}><a href="#{destination}">{cell[3]}</a></{cell[1]}>'
+                return cell[0]
+
+            return re.sub(r'<(td|th)\b([^>]*)>(.*?)</\1>', link_cell, row[0], flags=re.S)
+        return re.sub(r'<tr\b[^>]*>.*?</tr>', link_row, match[0], flags=re.S)
+
+    # Work backwards so offsets remain valid after inserting links.
+    for heading in reversed(headings):
+        if key(label(heading[3])) not in {'contents', 'briefcontents', 'spistreści'}:
+            continue
+        tables = re.match(r'(?:\s*<table\b.*?</table>)+', xhtml[heading.end():], re.S)
+        if tables:
+            start = heading.end()
+            end = start + tables.end()
+            xhtml = xhtml[:start] + re.sub(r'<table\b.*?</table>', link_table, xhtml[start:end], flags=re.S) + xhtml[end:]
+    return xhtml
+
+def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], content: Optional[str] = None, language: str = "en") -> tuple[str, list[str]]:
     """
     Convert markdown chapter to XHTML and process images.
     Returns tuple of (XHTML content, list of images referenced in chapter)
@@ -453,13 +581,15 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
     else:
         markdown_data = content
     
+    markdown_data = normalize_markdown_for_epub(markdown_data)
+
     # Process markdown for images and get list of referenced images
     markdown_data, chapter_images = process_markdown_for_images(markdown_data, work_dir_path)
     
     # Convert to HTML
     html_text = markdown.markdown(
         markdown_data,
-        extensions=["codehilite", "tables", "fenced_code", "footnotes"],
+        extensions=["codehilite", "tables", "fenced_code", "footnotes", "toc", "sane_lists"],
         extension_configs={"codehilite": {"guess_lang": False}}
     )
 
@@ -478,7 +608,8 @@ def get_chapter_XML(work_dir: str, md_filename: str, css_filenames: list[str], c
 </body>
 </html>"""
 
-    return xhtml, chapter_images
+    xhtml = link_printed_contents(xhtml)
+    return xhtml.replace('lang="en"', 'lang="{}"'.format(xml_escape(language, {'"': '&quot;'})), 1), chapter_images
 
 
 
@@ -576,7 +707,8 @@ def main(args):
                 work_dir, 
                 chapter["markdown"], 
                 css_files,
-                content=chapter_contents[chapter["markdown"]]
+                content=chapter_contents[chapter["markdown"]],
+                language=json_data["metadata"].get("dc:language", "en")
             )
             chapter_data[chapter["markdown"]] = chapter_xhtml
             all_referenced_images.update(chapter_images)
@@ -626,7 +758,7 @@ def main(args):
             )
 
             # Write cover page
-            coverpage_data = get_coverpage_XML(title, authors)
+            coverpage_data = get_coverpage_XML(title, authors, json_data["metadata"].get("dc:language", "en"))
             epub.writestr("OPS/titlepage.xhtml", coverpage_data.encode('utf-8'), zipfile.ZIP_DEFLATED)
 
             # Write processed chapters
@@ -647,8 +779,12 @@ def main(args):
 
             # Write TOC files
             print("Writing table of contents...")
+            navigation_entries = get_navigation_entries(
+                all_md_filenames, chapter_data, json_data.get("toc_titles")
+            )
             epub.writestr("OPS/TOC.xhtml", 
-                get_TOC_XML(json_data["default_css"], all_md_filenames),
+                get_TOC_XML(json_data["default_css"], all_md_filenames, navigation_entries,
+                            language=json_data["metadata"].get("dc:language", "en")),
                 zipfile.ZIP_DEFLATED
             )
             
@@ -656,7 +792,9 @@ def main(args):
                 get_TOCNCX_XML(
                     all_md_filenames,
                     uid=json_data["metadata"].get("dc:identifier", ""),
-                    title=json_data["metadata"].get("dc:title", "")
+                    title=json_data["metadata"].get("dc:title", ""),
+                    entries=navigation_entries,
+                    language=json_data["metadata"].get("dc:language", "en")
                 ),
                 zipfile.ZIP_DEFLATED
             )
